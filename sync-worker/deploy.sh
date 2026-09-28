@@ -7,6 +7,8 @@ REGION="southamerica-east1"
 REPOSITORY="video-editor"
 IMAGE="sync-worker"
 
+gcloud config set project $PROJECT_ID
+
 echo "🔨 Building..."
 docker build -t "$IMAGE" .
 
