@@ -6,6 +6,8 @@ RUN apt-get update \
 
 WORKDIR /app
 
+RUN pip install --no-cache-dir google-cloud-storage
+
 COPY sync.py .
 
 CMD ["python", "sync.py"]
