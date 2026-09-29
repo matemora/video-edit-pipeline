@@ -1,26 +1,47 @@
-#!/bin/bash
-
-set -e
-
 PROJECT_ID="ai-video-editor-510018"
-REGION="southamerica-east1"
+
+CLOUD_RUN_REGION="europe-west1"
+REGISTRY_REGION="southamerica-east1"
+
 REPOSITORY="video-editor"
-JOB="transcription-worker"
+IMAGE="transcription-worker"
 
-IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY/$JOB:latest"
+gcloud config set project "$PROJECT_ID"
 
-echo "🔨 Building..."
+IMAGE_URI="$REGISTRY_REGION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY/$IMAGE:latest"
+
+echo "🔨 Building with Cloud Build..."
+
 gcloud builds submit \
-  --tag "$IMAGE"
+  --tag "$IMAGE_URI" \
+  .
 
-echo "🚀 Deploying Cloud Run Job..."
-gcloud run jobs deploy "$JOB" \
-  --image "$IMAGE" \
-  --region "$REGION" \
-  --cpu 4 \
-  --memory 16Gi \
-  --gpu 1 \
-  --gpu-type nvidia-l4 \
-  --max-retries 1
+echo "🚀 Creating/updating Cloud Run Job..."
+
+if gcloud run jobs describe "$IMAGE" \
+  --region="$CLOUD_RUN_REGION" \
+  >/dev/null 2>&1; then
+
+  gcloud run jobs update "$IMAGE" \
+    --image="$IMAGE_URI" \
+    --region="$CLOUD_RUN_REGION" \
+    --cpu=4 \
+    --memory=16Gi \
+    --gpu=1 \
+    --gpu-type=nvidia-l4 \
+    --no-gpu-zonal-redundancy
+
+else
+
+  gcloud run jobs create "$IMAGE" \
+    --image="$IMAGE_URI" \
+    --region="$CLOUD_RUN_REGION" \
+    --cpu=4 \
+    --memory=16Gi \
+    --gpu=1 \
+    --gpu-type=nvidia-l4 \
+    --no-gpu-zonal-redundancy
+
+fi
 
 echo "✅ Deploy concluído!"
