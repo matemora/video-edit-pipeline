@@ -23,4 +23,29 @@ model = whisperx.load_model(
     language="pt"
 )
 
-print("✅ WhisperX large-v3 carregado com sucesso!")
+print("✅ Modelo carregado!")
+
+print("\n🎙️ Carregando áudio...")
+
+audio = whisperx.load_audio("test-audio.m4a")
+
+print("🧠 Transcrevendo...")
+
+result = model.transcribe(
+    audio,
+    batch_size=16,
+    language="pt"
+)
+
+print("\n📝 TRANSCRIÇÃO")
+print("=" * 60)
+
+for segment in result["segments"]:
+    start = segment["start"]
+    end = segment["end"]
+    text = segment["text"].strip()
+
+    print(f"[{start:.3f} -> {end:.3f}] {text}")
+
+print("=" * 60)
+print("✅ Transcrição concluída!")
