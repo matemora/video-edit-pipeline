@@ -1,17 +1,55 @@
-import torch
+import os
+import subprocess
 import whisperx
+from google.cloud import storage
+
+INPUT_URI = "gs://ai-video-editor-510018/synced/video-test-output.mp4"
+
+VIDEO_PATH = "/tmp/video_synced.mp4"
+AUDIO_PATH = "/tmp/audio_synced.wav"
+
+
+def download_from_gcs(gcs_uri, local_path):
+    bucket_name, blob_name = gcs_uri.replace("gs://", "", 1).split("/", 1)
+
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+
+    print(f"📥 Downloading {gcs_uri}...")
+    blob.download_to_filename(local_path)
+
+
+def extract_audio(video_path, audio_path):
+    print("🎙️ Extraindo áudio do vídeo sincronizado...")
+
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i", video_path,
+            "-vn",
+            "-ac", "1",
+            "-ar", "16000",
+            audio_path,
+        ],
+        check=True,
+    )
+
 
 print("🚀 Transcription worker")
-print("PyTorch:", torch.__version__)
-print("CUDA disponível:", torch.cuda.is_available())
 
-if not torch.cuda.is_available():
-    raise RuntimeError("GPU CUDA não está disponível")
+print(f"📁 Input: {INPUT_URI}")
 
-print("GPU:", torch.cuda.get_device_name(0))
-print("CUDA:", torch.version.cuda)
+download_from_gcs(INPUT_URI, VIDEO_PATH)
 
-print("\n📦 Carregando WhisperX large-v3...")
+print("🎬 Vídeo sincronizado baixado.")
+
+extract_audio(VIDEO_PATH, AUDIO_PATH)
+
+print("✅ Áudio extraído.")
+
+print("📦 Carregando WhisperX...")
 
 device = "cuda"
 compute_type = "float16"
@@ -20,21 +58,19 @@ model = whisperx.load_model(
     "large-v3",
     device,
     compute_type=compute_type,
-    language="pt"
+    language="pt",
 )
 
 print("✅ Modelo carregado!")
 
-print("\n🎙️ Carregando áudio...")
+print("🧠 Transcrevendo áudio sincronizado...")
 
-audio = whisperx.load_audio("test-audio.m4a")
-
-print("🧠 Transcrevendo...")
+audio = whisperx.load_audio(AUDIO_PATH)
 
 result = model.transcribe(
     audio,
     batch_size=16,
-    language="pt"
+    language="pt",
 )
 
 print("\n📝 TRANSCRIÇÃO")

@@ -7,9 +7,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir \
-    whisperx
+    whisperx \
+    google-cloud-storage
 
 COPY transcription.py .
-COPY test-audio.m4a .
 
-CMD ["python", "transcription.py"]
+CMD ["python", "-u", "transcription.py"]
