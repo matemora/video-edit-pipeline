@@ -8,7 +8,8 @@ RUN apt-get update \
 
 RUN pip install --no-cache-dir \
     whisperx \
-    google-cloud-storage
+    google-cloud-storage \
+    pydub
 
 COPY transcription.py .
 
