@@ -3,6 +3,7 @@ import json
 from google import genai
 from google.cloud import storage
 from pydantic import BaseModel
+import time
 
 # =========================
 # CONFIGURAÇÃO
@@ -16,15 +17,17 @@ OUTPUT_PREFIX = "edits/"
 INPUT_PATH = "/tmp/transcription.json"
 OUTPUT_PATH = "/tmp/edit.json"
 
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-3.6-flash"
 
 # =========================
 # OUTPUT STRUCTURE
 # =========================
 
+
 class EditSegment(BaseModel):
     start: float
     end: float
+
 
 class EditResult(BaseModel):
     video: str
@@ -33,6 +36,7 @@ class EditResult(BaseModel):
 # =========================
 # GCS
 # =========================
+
 
 def find_input_transcription():
     client = storage.Client()
@@ -61,6 +65,7 @@ def find_input_transcription():
 
     return files[0].name
 
+
 def download_from_gcs(gcs_uri, local_path):
     bucket_name, blob_name = (
         gcs_uri.replace("gs://", "", 1).split("/", 1)
@@ -76,6 +81,7 @@ def download_from_gcs(gcs_uri, local_path):
     )
 
     blob.download_to_filename(local_path)
+
 
 def upload_to_gcs(local_path, gcs_uri):
     bucket_name, blob_name = (
@@ -96,9 +102,57 @@ def upload_to_gcs(local_path, gcs_uri):
         content_type="application/json",
     )
 
+
+def generate_with_retry(client, prompt, config, max_retries=5):
+    for attempt in range(max_retries):
+        try:
+            print(
+                f"🤖 Chamando Gemini "
+                f"(tentativa {attempt + 1}/{max_retries})...",
+                flush=True,
+            )
+
+            return client.models.generate_content(
+                model=MODEL,
+                contents=prompt,
+                config=config,
+            )
+
+        except Exception as e:
+            error_message = str(e)
+
+            is_retryable = (
+                "503" in error_message
+                or "UNAVAILABLE" in error_message
+                or "429" in error_message
+                or "RESOURCE_EXHAUSTED" in error_message
+            )
+
+            if not is_retryable:
+                raise
+
+            if attempt == max_retries - 1:
+                print(
+                    "❌ Gemini continua indisponível "
+                    "após várias tentativas.",
+                    flush=True,
+                )
+                raise
+
+            wait_seconds = 2 ** attempt
+
+            print(
+                f"⚠️ Gemini temporariamente indisponível. "
+                f"Nova tentativa em {wait_seconds}s...",
+                flush=True,
+            )
+
+            time.sleep(wait_seconds)
+
 # =========================
 # MAIN
 # =========================
+
 
 INPUT_BLOB = find_input_transcription()
 
@@ -275,13 +329,15 @@ print(
     flush=True
 )
 
-response = client.models.generate_content(
-    model=MODEL,
-    contents=prompt,
-    config={
-        "response_mime_type": "application/json",
-        "response_schema": EditResult,
-    },
+config = {
+    "response_mime_type": "application/json",
+    "response_schema": EditResult,
+}
+
+response = generate_with_retry(
+    client,
+    prompt,
+    config,
 )
 
 # =========================
