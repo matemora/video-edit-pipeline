@@ -1,0 +1,4 @@
+gcloud run jobs execute sync-worker \
+  --region=southamerica-east1 \
+  --update-env-vars="BUCKET=ai-video-editor-510018,VIDEO_INPUT=gs://ai-video-editor-510018/input/video.mov,AUDIO_INPUT=gs://ai-video-editor-510018/input/audio.m4a,OUTPUT=gs://ai-video-editor-510018/synced/video_synced.mp4" \
+  --wait

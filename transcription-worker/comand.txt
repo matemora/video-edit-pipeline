@@ -1,0 +1,3 @@
+gcloud run jobs execute transcription-worker \
+  --region=europe-west1 \
+  --wait
