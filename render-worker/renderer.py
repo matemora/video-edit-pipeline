@@ -101,110 +101,75 @@ def render_segments(video_path, segments, output_path):
         flush=True
     )
 
-    temp_dir = tempfile.mkdtemp(
-        prefix="render-"
-    )
+    filter_parts = []
+    concat_inputs = []
 
-    segment_files = []
-
-    try:
-        for index, segment in enumerate(
-            segments,
-            1
-        ):
-            start = segment["start"]
-            end = segment["end"]
-
-            duration = end - start
-
-            segment_path = os.path.join(
-                temp_dir,
-                f"segment_{index:04d}.mp4"
-            )
-
-            print(
-                f"✂️ Segmento {index}/{len(segments)} "
-                f"[{start:.3f} -> {end:.3f}] "
-                f"({duration:.3f}s)",
-                flush=True
-            )
-
-            subprocess.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-ss",
-                    str(start),
-                    "-i",
-                    video_path,
-                    "-t",
-                    str(duration),
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "veryfast",
-                    "-crf",
-                    "19",
-                    "-c:a",
-                    "aac",
-                    "-movflags",
-                    "+faststart",
-                    segment_path,
-                ],
-                check=True,
-            )
-
-            segment_files.append(
-                segment_path
-            )
-
-        concat_file = os.path.join(
-            temp_dir,
-            "concat.txt"
-        )
-
-        with open(
-            concat_file,
-            "w",
-            encoding="utf-8"
-        ) as f:
-            for segment_file in segment_files:
-                f.write(
-                    f"file '{segment_file}'\n"
-                )
+    for index, segment in enumerate(segments):
+        start = segment["start"]
+        end = segment["end"]
 
         print(
-            "\n🔗 Concatenando segmentos...",
+            f"✂️ Segmento {index + 1}/{len(segments)} "
+            f"[{start:.3f} -> {end:.3f}] "
+            f"({end - start:.3f}s)",
             flush=True
         )
 
-        subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                concat_file,
-                "-c",
-                "copy",
-                "-movflags",
-                "+faststart",
-                output_path,
-            ],
-            check=True,
+        filter_parts.append(
+            f"[0:v]trim=start={start}:end={end},"
+            f"setpts=PTS-STARTPTS[v{index}];"
         )
 
-    finally:
-        for segment_file in segment_files:
-            if os.path.exists(segment_file):
-                os.remove(segment_file)
+        filter_parts.append(
+            f"[0:a]atrim=start={start}:end={end},"
+            f"asetpts=PTS-STARTPTS[a{index}];"
+        )
 
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
+        concat_inputs.append(
+            f"[v{index}][a{index}]"
+        )
 
+    concat_filter = (
+        "".join(concat_inputs)
+        + f"concat=n={len(segments)}:v=1:a=1[outv][outa]"
+    )
+
+    filter_complex = (
+        "".join(filter_parts)
+        + concat_filter
+    )
+
+    print(
+        "\n🎬 Executando FFmpeg...",
+        flush=True
+    )
+
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            video_path,
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[outv]",
+            "-map",
+            "[outa]",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "19",
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+            output_path,
+        ],
+        check=True,
+    )
 
 # =========================
 # MAIN
