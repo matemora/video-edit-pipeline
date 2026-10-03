@@ -17,7 +17,7 @@ OUTPUT_PREFIX = "edits/"
 INPUT_PATH = "/tmp/transcription.json"
 OUTPUT_PATH = "/tmp/edit.json"
 
-MODEL = "gemini-3.6-flash"
+MODEL = "gemini-3.8-flash"
 
 # =========================
 # OUTPUT STRUCTURE
@@ -139,7 +139,7 @@ def generate_with_retry(client, prompt, config, max_retries=5):
                 )
                 raise
 
-            wait_seconds = 2 ** attempt
+            wait_seconds = 5 ** attempt
 
             print(
                 f"⚠️ Gemini temporariamente indisponível. "
@@ -243,12 +243,15 @@ de um vídeo a partir de uma gravação contendo várias
 tentativas do apresentador.
 
 A transcrição abaixo contém segmentos com timestamps
-originais do vídeo.
+originais do vídeo e timestamps individuais para cada palavra.
 
 OBJETIVO:
 
 Montar o vídeo final mais conciso, natural e coerente
 possível usando somente trechos existentes na gravação.
+
+O resultado deve parecer uma gravação única e bem editada,
+mesmo que tenha sido construído a partir de várias tentativas.
 
 COMO A GRAVAÇÃO FUNCIONA:
 
@@ -265,6 +268,30 @@ melhor tentativa
 
 Por isso, quando existirem várias tentativas da mesma ideia,
 você deve identificar qual delas funciona melhor.
+
+IMPORTANTE:
+
+Um segmento da transcrição NÃO é necessariamente uma unidade
+indivisível de edição.
+
+Você pode usar apenas uma parte de um segmento quando isso
+produzir uma edição melhor.
+
+Por exemplo, se um segmento contém:
+
+"Existe o Git. O Git é uma ferramenta..."
+
+e depois existe outro take contendo:
+
+"O Git é uma ferramenta que vai permitir..."
+
+você pode manter o primeiro segmento somente até
+"Existe o Git." e descartar a continuação "O Git é uma
+ferramenta...".
+
+Isso é especialmente importante quando o apresentador
+começa uma frase, percebe que quer refazê-la e imediatamente
+repete a mesma frase em outro take.
 
 REGRAS:
 
@@ -285,31 +312,138 @@ REGRAS:
    NÃO é uma regra absoluta. Analise o conteúdo e escolha
    o take que melhor funciona.
 
-7. Não combine dois takes diferentes para formar uma frase,
-   a menos que isso seja claramente necessário e os trechos
-   funcionem naturalmente juntos.
+7. Um take pode ser parcialmente aproveitado.
 
-8. Preserve a ordem original das ideias.
+   Se apenas o início de um segmento for útil, escolha
+   somente esse início.
 
-9. Não invente nenhum timestamp.
+   Se apenas o final de um segmento for útil, escolha
+   somente esse final.
 
-10. Todos os timestamps retornados devem existir na
-    transcrição fornecida.
+   Não descarte obrigatoriamente o segmento inteiro apenas
+   porque uma parte dele contém uma tentativa repetida.
 
-11. O resultado deve ser um roteiro conciso. Se uma ideia
-    já foi explicada em um take escolhido, não escolha outro
-    take que repita a mesma explicação.
+8. Quando um apresentador termina uma ideia e imediatamente
+   começa a repetir ou refazer a próxima frase, corte o
+   segmento exatamente antes do início da repetição.
 
-12. Não faça uma análise ou explicação da decisão.
-    Retorne somente a estrutura JSON solicitada.
+9. Use os timestamps das palavras para encontrar pontos
+   precisos de corte.
 
-IMPORTANTE:
+10. Quando fizer um corte dentro de um segmento, o timestamp
+    "end" deve ser exatamente o "end" de uma palavra existente
+    na transcrição.
 
-O campo "segments" representa EXATAMENTE os trechos que
-serão enviados ao renderizador.
+11. Quando fizer um corte interno, o timestamp "start" também
+    deve ser exatamente o "start" de uma palavra existente,
+    exceto quando estiver usando o início original de um
+    segmento.
 
-Portanto, se um segmento não estiver na lista "segments",
-ele será descartado.
+12. NÃO invente timestamps.
+
+13. Todos os timestamps retornados devem existir na
+    transcrição fornecida ou corresponder exatamente aos
+    timestamps "start" ou "end" de palavras existentes.
+
+14. Não combine dois takes diferentes para formar uma frase,
+    a menos que os trechos funcionem naturalmente juntos.
+
+15. Preserve a ordem original das ideias.
+
+16. Se uma ideia já foi explicada em um take escolhido,
+    não escolha outro take que repita a mesma explicação.
+
+17. Frases que começam de maneira semelhante NÃO são
+    necessariamente duplicadas. Analise o conteúdo completo
+    antes de decidir.
+
+18. Uma frase repetida pode ser necessária quando ela aparece
+    como continuação natural de uma ideia anterior.
+
+19. Diferencie entre:
+
+    A) repetição descartável:
+       o apresentador repete uma frase para tentar novamente;
+
+    B) repetição necessária:
+       a mesma expressão aparece novamente porque faz parte
+       da estrutura natural da explicação.
+
+20. Quando houver uma tentativa incompleta seguida de uma
+    tentativa melhor e completa, prefira a tentativa completa
+    para aquela ideia, mas preserve a parte anterior da
+    tentativa incompleta se ela contiver conteúdo útil que
+    não foi repetido.
+
+EXEMPLO DE RACIOCÍNIO:
+
+Se existir:
+
+[61.627 -> 73.485]
+"Para a gente manter esse histórico... existe o Git.
+O Git é uma ferramenta,"
+
+e depois:
+
+[77.378 -> 78.468]
+"O Git é uma ferramenta"
+
+e depois:
+
+[86.892 -> 91.237]
+"O Git é uma ferramenta que vai permitir você fazer
+o versionamento do seu código."
+
+o primeiro segmento pode ser cortado em:
+
+[61.627 -> 71.740]
+
+porque "existe o Git." completa a ideia anterior.
+
+Depois pode ser escolhido:
+
+[86.892 -> 91.237]
+
+para explicar o que é o Git.
+
+Nesse caso, NÃO mantenha:
+
+[72.141 -> 73.485]
+"O Git é uma ferramenta,"
+
+porque essa frase está sendo refeita no take posterior.
+
+IMPORTANTE SOBRE OS TIMESTAMPS:
+
+Cada objeto retornado em "segments" representa EXATAMENTE
+um trecho que será enviado ao renderizador.
+
+O renderizador aceitará qualquer combinação válida de
+"start" e "end".
+
+Portanto, os limites de um segmento podem ser diferentes
+dos limites do segmento original da transcrição.
+
+FORMATO DA RESPOSTA:
+
+Retorne SOMENTE JSON válido neste formato:
+
+{json.dumps({
+  "segments": [
+    {
+      "start": 61.627,
+      "end": 71.740
+    },
+    {
+      "start": 86.892,
+      "end": 91.237
+    }
+  ]
+}, ensure_ascii=False, indent=2)}
+
+Não inclua texto explicativo.
+Não inclua comentários.
+Não inclua markdown.
 
 TRANSCRIÇÃO:
 
