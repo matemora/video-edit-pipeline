@@ -1,7 +1,7 @@
 import os
-import subprocess
 import json
 import gc
+import subprocess
 
 import numpy as np
 import torch
@@ -23,10 +23,23 @@ VIDEO_PATH = "/tmp/video_synced.mp4"
 AUDIO_PATH = "/tmp/audio_synced.wav"
 OUTPUT_PATH = "/tmp/transcription.json"
 
-SILENCE_DB = -55
+
+# =========================
+# DETECÇÃO DE SILÊNCIO
+# =========================
+
 LONG_PAUSE = 0.5
 MIN_SPEECH_DURATION = 0.5
 PADDING = 0.10
+
+# Threshold dinâmico
+NOISE_PERCENTILE = 20
+MARGIN_DB = 7
+
+
+# =========================
+# WHISPERX
+# =========================
 
 DEVICE = "cuda"
 COMPUTE_TYPE = "float16"
@@ -48,7 +61,10 @@ def download_from_gcs(gcs_uri, local_path):
     bucket = client.bucket(bucket_name)
     blob = bucket.blob(blob_name)
 
-    print(f"📥 Downloading {gcs_uri}...", flush=True)
+    print(
+        f"📥 Downloading {gcs_uri}...",
+        flush=True
+    )
 
     blob.download_to_filename(local_path)
 
@@ -134,31 +150,38 @@ def extract_audio(video_path, audio_path):
 
 def detect_speech_segments(audio_file):
     print(
-        "📌 Analisando áudio para detectar pausas...",
+        "\n📌 Analisando perfil do áudio...",
         flush=True
     )
 
-    audio_file = (
+    audio = (
         AudioSegment
         .from_file(audio_file)
         .set_channels(1)
     )
 
-    sample_rate = audio_file.frame_rate
-    duration = len(audio_file) / 1000
+    sample_rate = audio.frame_rate
+
+    duration = len(audio) / 1000
 
     samples = np.array(
-        audio_file.get_array_of_samples(),
+        audio.get_array_of_samples(),
         dtype=np.float32
     )
 
-    if audio_file.sample_width == 2:
+    if audio.sample_width == 2:
         samples /= 32768.0
 
-    elif audio_file.sample_width == 4:
+    elif audio.sample_width == 4:
         samples /= 2147483648.0
 
-    window = int(sample_rate * 0.02)
+    # =========================
+    # RMS
+    # =========================
+
+    window = int(
+        sample_rate * 0.02
+    )
 
     rms = np.sqrt(
         np.convolve(
@@ -169,20 +192,86 @@ def detect_speech_segments(audio_file):
     )
 
     db = 20 * np.log10(
-        np.maximum(rms, 1e-10)
+        np.maximum(
+            rms,
+            1e-10
+        )
     )
 
-    is_silent = db < SILENCE_DB
+    # =========================
+    # NOISE FLOOR
+    # =========================
+
+    noise_floor = np.percentile(
+        db,
+        NOISE_PERCENTILE
+    )
+
+    silence_db = (
+        noise_floor +
+        MARGIN_DB
+    )
+
+    print("\n" + "=" * 60)
+    print("🎚️ PERFIL DO ÁUDIO")
+    print("=" * 60)
+
+    print(
+        f"Duração:        {duration:.2f}s"
+    )
+
+    print(
+        f"Noise floor:    {noise_floor:.2f} dB"
+    )
+
+    print(
+        f"Margem:         {MARGIN_DB:.2f} dB"
+    )
+
+    print(
+        f"Auto threshold: {silence_db:.2f} dB"
+    )
+
+    print(
+        f"Long pause:     {LONG_PAUSE:.2f}s"
+    )
+
+    print(
+        f"Min speech:     {MIN_SPEECH_DURATION:.2f}s"
+    )
+
+    print(
+        f"Padding:        {PADDING:.2f}s"
+    )
+
+    print("=" * 60)
+
+    # =========================
+    # DETECTAR SILÊNCIO
+    # =========================
+
+    is_silent = (
+        db < silence_db
+    )
 
     changes = np.diff(
         is_silent.astype(np.int8)
     )
 
-    starts = np.where(changes == 1)[0]
-    ends = np.where(changes == -1)[0]
+    starts = np.where(
+        changes == 1
+    )[0]
+
+    ends = np.where(
+        changes == -1
+    )[0]
 
     if is_silent[0]:
-        starts = np.insert(starts, 0, 0)
+        starts = np.insert(
+            starts,
+            0,
+            0
+        )
 
     if is_silent[-1]:
         ends = np.append(
@@ -190,42 +279,102 @@ def detect_speech_segments(audio_file):
             len(is_silent) - 1
         )
 
+    # =========================
+    # PAUSAS LONGAS
+    # =========================
+
     long_pauses = []
 
-    for start, end in zip(starts, ends):
+    for start, end in zip(
+        starts,
+        ends
+    ):
+        start_s = (
+            start /
+            sample_rate
+        )
 
-        start_s = start / sample_rate
-        end_s = end / sample_rate
+        end_s = (
+            end /
+            sample_rate
+        )
 
-        if end_s - start_s >= LONG_PAUSE:
+        pause_duration = (
+            end_s -
+            start_s
+        )
+
+        if pause_duration >= LONG_PAUSE:
             long_pauses.append(
-                (start_s, end_s)
+                (
+                    start_s,
+                    end_s
+                )
             )
 
+    # =========================
+    # BLOCOS DE FALA
+    # =========================
+
     speech_segments = []
+
     cursor = 0.0
 
     for silence_start, silence_end in long_pauses:
 
-        speech_end = silence_start - PADDING
-
-        if speech_end - cursor >= MIN_SPEECH_DURATION:
-            speech_segments.append(
-                (cursor, speech_end)
-            )
-
-        cursor = silence_end + PADDING
-
-    if duration - cursor >= MIN_SPEECH_DURATION:
-        speech_segments.append(
-            (cursor, duration)
+        speech_end = (
+            silence_start -
+            PADDING
         )
 
+        if (
+            speech_end - cursor
+            >= MIN_SPEECH_DURATION
+        ):
+            speech_segments.append(
+                (
+                    cursor,
+                    speech_end
+                )
+            )
+
+        cursor = (
+            silence_end +
+            PADDING
+        )
+
+    # Último bloco
+
+    if (
+        duration - cursor
+        >= MIN_SPEECH_DURATION
+    ):
+        speech_segments.append(
+            (
+                cursor,
+                duration
+            )
+        )
+
+    # =========================
+    # SEGURANÇA
+    # =========================
+
     speech_segments = [
-        (start, end)
+        (
+            start,
+            end
+        )
         for start, end in speech_segments
-        if end - start >= MIN_SPEECH_DURATION
+        if (
+            end - start
+            >= MIN_SPEECH_DURATION
+        )
     ]
+
+    # =========================
+    # RESULTADO
+    # =========================
 
     print(
         f"\n🎙️ {len(speech_segments)} "
@@ -233,13 +382,17 @@ def detect_speech_segments(audio_file):
         flush=True
     )
 
-    for i, (start, end) in enumerate(
+    for i, (
+        start,
+        end
+    ) in enumerate(
         speech_segments,
         1
     ):
         print(
             f"{i:03d}. "
-            f"[{start:.3f} -> {end:.3f}] "
+            f"[{start:.3f} -> "
+            f"{end:.3f}] "
             f"({end - start:.3f}s)",
             flush=True
         )
@@ -254,14 +407,18 @@ def detect_speech_segments(audio_file):
 def transcribe_segments(
     audio_file,
     speech_segments,
-    model
+    model,
+    align_model,
+    align_metadata
 ):
     print(
         "\n📌 Carregando áudio para WhisperX...",
         flush=True
     )
 
-    audio = whisperx.load_audio(audio_file)
+    audio = whisperx.load_audio(
+        audio_file
+    )
 
     transcription = []
 
@@ -270,13 +427,18 @@ def transcribe_segments(
         flush=True
     )
 
-    for i, (block_start, block_end) in enumerate(
+    for i, (
+        block_start,
+        block_end
+    ) in enumerate(
         speech_segments,
         1
     ):
         print(
-            f"🎙️ Bloco {i}/{len(speech_segments)} "
-            f"[{block_start:.3f} -> {block_end:.3f}]",
+            f"🎙️ Bloco "
+            f"{i}/{len(speech_segments)} "
+            f"[{block_start:.3f} -> "
+            f"{block_end:.3f}]",
             flush=True
         )
 
@@ -285,15 +447,39 @@ def transcribe_segments(
             int(block_end * 16000)
         ]
 
+        # =========================
+        # TRANSCRIÇÃO
+        # =========================
+
         result = model.transcribe(
             block_audio,
             batch_size=BATCH_SIZE,
             language=LANGUAGE
         )
 
-        for segment in result["segments"]:
+        # =========================
+        # ALINHAMENTO POR PALAVRA
+        # =========================
 
-            text = segment["text"].strip()
+        aligned = whisperx.align(
+            result["segments"],
+            align_model,
+            align_metadata,
+            block_audio,
+            DEVICE,
+            return_char_alignments=False
+        )
+
+        # =========================
+        # SEGMENTOS
+        # =========================
+
+        for segment in aligned["segments"]:
+
+            text = (
+                segment["text"]
+                .strip()
+            )
 
             if not text:
                 continue
@@ -308,20 +494,76 @@ def transcribe_segments(
                 segment["end"]
             )
 
+            # =========================
+            # PALAVRAS
+            # =========================
+
+            words = []
+
+            for word in segment.get(
+                "words",
+                []
+            ):
+                if (
+                    "start" not in word
+                    or "end" not in word
+                ):
+                    continue
+
+                word_start = (
+                    block_start +
+                    word["start"]
+                )
+
+                word_end = (
+                    block_start +
+                    word["end"]
+                )
+
+                words.append({
+                    "word": word["word"],
+                    "start": round(
+                        word_start,
+                        3
+                    ),
+                    "end": round(
+                        word_end,
+                        3
+                    )
+                })
+
             transcription.append({
-                "start": round(start, 3),
-                "end": round(end, 3),
-                "text": text
+                "start": round(
+                    start,
+                    3
+                ),
+                "end": round(
+                    end,
+                    3
+                ),
+                "text": text,
+                "words": words
             })
 
             print(
-                f"   [{start:.3f} -> {end:.3f}] "
+                f"   [{start:.3f} -> "
+                f"{end:.3f}] "
                 f"{text}",
                 flush=True
             )
 
+            if words:
+                print(
+                    f"      "
+                    f"{len(words)} palavras "
+                    f"alinhadas",
+                    flush=True
+                )
+
         gc.collect()
-        torch.cuda.empty_cache()
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     return transcription
 
@@ -336,7 +578,9 @@ INPUT_URI = (
     f"gs://{BUCKET_NAME}/{INPUT_BLOB}"
 )
 
-filename = os.path.basename(INPUT_BLOB)
+filename = os.path.basename(
+    INPUT_BLOB
+)
 
 name_without_extension = os.path.splitext(
     filename
@@ -427,13 +671,37 @@ print(
 
 
 # =========================
+# ALIGNMENT MODEL
+# =========================
+
+print(
+    "\n📌 Carregando modelo de alinhamento...",
+    flush=True
+)
+
+align_model, align_metadata = (
+    whisperx.load_align_model(
+        language_code=LANGUAGE,
+        device=DEVICE,
+    )
+)
+
+print(
+    "✅ Modelo de alinhamento carregado!",
+    flush=True
+)
+
+
+# =========================
 # TRANSCRIBIR
 # =========================
 
 transcription = transcribe_segments(
     AUDIO_PATH,
     speech_segments,
-    model
+    model,
+    align_model,
+    align_metadata
 )
 
 
@@ -442,9 +710,11 @@ transcription = transcribe_segments(
 # =========================
 
 output = {
-    "video": os.path.basename(INPUT_URI),
+    "video": os.path.basename(
+        INPUT_URI
+    ),
     "language": LANGUAGE,
-    "segments": transcription,
+    "segments": transcription
 }
 
 with open(
@@ -461,7 +731,8 @@ with open(
 
 
 print(
-    f"\n💾 JSON gerado: {OUTPUT_PATH}",
+    f"\n💾 JSON gerado: "
+    f"{OUTPUT_PATH}",
     flush=True
 )
 
