@@ -55,6 +55,56 @@ Each worker has a single responsibility and communicates with the others through
 
 ---
 
+## 💡 Project Motivation
+
+Creating educational and technical video content involves much more than recording.
+
+A typical recording session may contain multiple takes, mistakes, repetitions, long pauses, and separate audio or screen recordings. Manually reviewing and cutting this material is repetitive and time-consuming, especially when producing content regularly.
+
+This project was created to explore a different approach:
+
+> **What if AI could make the editing decisions while deterministic tools handled the actual media processing?**
+
+Instead of asking an AI model to manipulate video directly, the pipeline separates **understanding** from **execution**.
+
+The AI analyzes the transcription and determines **what should remain**. It produces a structured list of timestamps representing the desired edit. FFmpeg then deterministically applies those decisions to the original media.
+
+This architecture provides a useful balance between AI flexibility and traditional software engineering principles:
+
+```text
+Human recording
+      ↓
+Synchronization
+      ↓
+Speech understanding
+      ↓
+AI edit decisions
+      ↓
+Deterministic rendering
+      ↓
+Final video
+```
+
+### Why build it?
+
+The project serves as a practical exploration of several engineering challenges that emerge when combining AI with production software:
+
+* **AI-assisted decision making** — using an LLM for semantic understanding rather than direct media manipulation.
+* **Multimodal media processing** — synchronizing video, external audio and additional video sources.
+* **GPU workloads** — running WhisperX and large speech models in Cloud Run with NVIDIA GPUs.
+* **Precise temporal data** — using word-level timestamps to make edits at the exact boundaries required by the video.
+* **Distributed processing** — breaking a computationally expensive workflow into independent Cloud Run Jobs.
+* **Reproducible pipelines** — using intermediate JSON artifacts so each stage can be inspected, debugged and re-run independently.
+* **Cost-aware architecture** — reserving GPU infrastructure for transcription while keeping synchronization, AI orchestration and rendering on CPU workloads.
+
+The goal is not simply to automate video editing, but to experiment with an architecture where **AI handles the parts that require judgment and conventional software handles the parts that require precision and reliability**.
+
+This project is also an exploration of a broader engineering principle:
+
+> **AI doesn't have to replace deterministic software. It can decide what should happen, while deterministic systems remain responsible for making it happen correctly.**
+
+---
+
 ## 🧠 How the Pipeline Works
 
 ### 1. Sync Worker
