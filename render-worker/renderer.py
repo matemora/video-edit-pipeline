@@ -101,6 +101,39 @@ def render_segments(video_path, segments, output_path):
         flush=True
     )
 
+    # =========================
+    # Detectar se existe áudio
+    # =========================
+
+    probe = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=index",
+            "-of",
+            "csv=p=0",
+            video_path,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    has_audio = bool(probe.stdout.strip())
+
+    print(
+        f"🔊 Áudio detectado: {'sim' if has_audio else 'não'}",
+        flush=True
+    )
+
+    # =========================
+    # Construir filter graph
+    # =========================
+
     filter_parts = []
     concat_inputs = []
 
@@ -115,65 +148,95 @@ def render_segments(video_path, segments, output_path):
             flush=True
         )
 
+        # Vídeo
         filter_parts.append(
             f"[0:v]trim=start={start}:end={end},"
             f"setpts=PTS-STARTPTS[v{index}];"
         )
 
-        filter_parts.append(
-            f"[0:a]atrim=start={start}:end={end},"
-            f"asetpts=PTS-STARTPTS[a{index}];"
-        )
+        if has_audio:
+            # Áudio
+            filter_parts.append(
+                f"[0:a]atrim=start={start}:end={end},"
+                f"asetpts=PTS-STARTPTS[a{index}];"
+            )
 
-        concat_inputs.append(
-            f"[v{index}][a{index}]"
-        )
+            concat_inputs.append(
+                f"[v{index}][a{index}]"
+            )
 
-    concat_filter = (
-        "".join(concat_inputs)
-        + f"concat=n={len(segments)}:v=1:a=1[outv][outa]"
-    )
+        else:
+            concat_inputs.append(
+                f"[v{index}]"
+            )
+
+    # =========================
+    # Concat
+    # =========================
+
+    if has_audio:
+        concat_filter = (
+            "".join(concat_inputs)
+            + f"concat=n={len(segments)}:v=1:a=1[outv][outa]"
+        )
+    else:
+        concat_filter = (
+            "".join(concat_inputs)
+            + f"concat=n={len(segments)}:v=1:a=0[outv]"
+        )
 
     filter_complex = (
         "".join(filter_parts)
         + concat_filter
     )
 
+    # =========================
+    # FFmpeg
+    # =========================
+
     print(
         "\n🎬 Executando FFmpeg...",
         flush=True
     )
 
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-i",
-            video_path,
-            "-filter_complex",
-            filter_complex,
-            "-map",
-            "[outv]",
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        video_path,
+        "-filter_complex",
+        filter_complex,
+        "-map",
+        "[outv]",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "19",
+        "-movflags",
+        "+faststart",
+    ]
+
+    if has_audio:
+        command.extend([
             "-map",
             "[outa]",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "19",
             "-c:a",
             "aac",
-            "-movflags",
-            "+faststart",
-            output_path,
-        ],
+        ])
+
+    command.append(output_path)
+
+    subprocess.run(
+        command,
         check=True,
     )
 
 # =========================
 # MAIN
 # =========================
+
 
 VIDEO_BLOB = find_file(
     VIDEO_PREFIX,
