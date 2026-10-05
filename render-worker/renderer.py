@@ -25,7 +25,7 @@ OUTPUT_PATH = "/tmp/final.mp4"
 # GCS
 # =========================
 
-def find_file(prefix, extension):
+def find_files(prefix, extension):
     client = storage.Client()
     bucket = client.bucket(BUCKET_NAME)
 
@@ -34,7 +34,7 @@ def find_file(prefix, extension):
     )
 
     files = [
-        blob
+        blob.name
         for blob in blobs
         if blob.name.lower().endswith(extension)
     ]
@@ -44,14 +44,7 @@ def find_file(prefix, extension):
             f"Nenhum arquivo {extension} encontrado em {prefix}"
         )
 
-    if len(files) > 1:
-        raise RuntimeError(
-            f"Esperado apenas um arquivo {extension} "
-            f"em {prefix}, encontrados {len(files)}"
-        )
-
-    return files[0].name
-
+    return files
 
 def download_from_gcs(gcs_uri, local_path):
     bucket_name, blob_name = (
@@ -237,37 +230,26 @@ def render_segments(video_path, segments, output_path):
 # MAIN
 # =========================
 
-
-VIDEO_BLOB = find_file(
+VIDEO_BLOBS = find_files(
     VIDEO_PREFIX,
     ".mp4"
 )
 
-EDIT_BLOB = find_file(
+EDIT_BLOBS = find_files(
     EDIT_PREFIX,
     ".json"
 )
 
-VIDEO_URI = (
-    f"gs://{BUCKET_NAME}/{VIDEO_BLOB}"
-)
+if len(EDIT_BLOBS) != 1:
+    raise RuntimeError(
+        f"Esperado exatamente um edit JSON em "
+        f"{EDIT_PREFIX}, encontrados {len(EDIT_BLOBS)}"
+    )
+
+EDIT_BLOB = EDIT_BLOBS[0]
 
 EDIT_URI = (
     f"gs://{BUCKET_NAME}/{EDIT_BLOB}"
-)
-
-filename = os.path.basename(
-    VIDEO_BLOB
-)
-
-name_without_extension = os.path.splitext(
-    filename
-)[0]
-
-OUTPUT_URI = (
-    f"gs://{BUCKET_NAME}/"
-    f"{OUTPUT_PREFIX}"
-    f"{name_without_extension}.mp4"
 )
 
 
@@ -277,32 +259,12 @@ print(
 )
 
 print(
-    f"🎬 Video: {VIDEO_URI}",
+    f"🎬 Vídeos encontrados: {len(VIDEO_BLOBS)}",
     flush=True
 )
 
 print(
     f"✂️ Edit: {EDIT_URI}",
-    flush=True
-)
-
-print(
-    f"📄 Output: {OUTPUT_URI}",
-    flush=True
-)
-
-
-# =========================
-# DOWNLOAD VIDEO
-# =========================
-
-download_from_gcs(
-    VIDEO_URI,
-    VIDEO_PATH
-)
-
-print(
-    "✅ Vídeo baixado.",
     flush=True
 )
 
@@ -350,37 +312,112 @@ print(
 
 
 # =========================
-# RENDER
+# RENDER CADA VÍDEO
 # =========================
 
-render_segments(
-    VIDEO_PATH,
-    segments,
-    OUTPUT_PATH
-)
+for index, video_blob in enumerate(
+    VIDEO_BLOBS,
+    1
+):
+    video_uri = (
+        f"gs://{BUCKET_NAME}/{video_blob}"
+    )
 
+    filename = os.path.basename(
+        video_blob
+    )
 
-print(
-    "\n✅ Render concluído!",
-    flush=True
-)
+    name_without_extension = (
+        os.path.splitext(filename)[0]
+    )
 
+    output_path = (
+        f"/tmp/{name_without_extension}_final.mp4"
+    )
 
-# =========================
-# UPLOAD
-# =========================
+    output_uri = (
+        f"gs://{BUCKET_NAME}/"
+        f"{OUTPUT_PREFIX}"
+        f"{name_without_extension}.mp4"
+    )
 
-upload_to_gcs(
-    OUTPUT_PATH,
-    OUTPUT_URI
-)
+    print(
+        "\n" + "=" * 60,
+        flush=True
+    )
+
+    print(
+        f"🎬 Vídeo {index}/{len(VIDEO_BLOBS)}",
+        flush=True
+    )
+
+    print(
+        f"📥 Input: {video_uri}",
+        flush=True
+    )
+
+    print(
+        f"📤 Output: {output_uri}",
+        flush=True
+    )
+
+    print(
+        "=" * 60,
+        flush=True
+    )
+
+    # =========================
+    # DOWNLOAD VIDEO
+    # =========================
+
+    download_from_gcs(
+        video_uri,
+        VIDEO_PATH
+    )
+
+    print(
+        "✅ Vídeo baixado.",
+        flush=True
+    )
+
+    # =========================
+    # RENDER
+    # =========================
+
+    render_segments(
+        VIDEO_PATH,
+        segments,
+        output_path
+    )
+
+    print(
+        "✅ Render concluído!",
+        flush=True
+    )
+
+    # =========================
+    # UPLOAD
+    # =========================
+
+    upload_to_gcs(
+        output_path,
+        output_uri
+    )
+
+    print(
+        f"🎉 Vídeo enviado: {output_uri}",
+        flush=True
+    )
+
+    # Limpar arquivo anterior antes do próximo vídeo
+    if os.path.exists(VIDEO_PATH):
+        os.remove(VIDEO_PATH)
+
+    if os.path.exists(output_path):
+        os.remove(output_path)
+
 
 print(
     "\n🎉 Render Worker concluído!",
-    flush=True
-)
-
-print(
-    f"📄 Final: {OUTPUT_URI}",
     flush=True
 )
