@@ -17,7 +17,13 @@ OUTPUT_PREFIX = "edits/"
 INPUT_PATH = "/tmp/transcription.json"
 OUTPUT_PATH = "/tmp/edit.json"
 
-MODEL = "gemini-3.8-flash"
+MODELS = [
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.0-flash",
+    "gemini-2.5-flash",
+]
 
 # =========================
 # OUTPUT STRUCTURE
@@ -103,52 +109,58 @@ def upload_to_gcs(local_path, gcs_uri):
     )
 
 
-def generate_with_retry(client, prompt, config, max_retries=5):
-    for attempt in range(max_retries):
-        try:
-            print(
-                f"🤖 Chamando Gemini "
-                f"(tentativa {attempt + 1}/{max_retries})...",
-                flush=True,
-            )
+def generate_with_models(
+    client,
+    prompt,
+    config,
+    models
+):
+    last_error = None
 
-            return client.models.generate_content(
-                model=MODEL,
+    for index, model in enumerate(models, 1):
+
+        print(
+            f"\n🤖 Modelo {index}/{len(models)}: {model}",
+            flush=True
+        )
+
+        try:
+
+            response = client.models.generate_content(
+                model=model,
                 contents=prompt,
                 config=config,
             )
 
-        except Exception as e:
-            error_message = str(e)
-
-            is_retryable = (
-                "503" in error_message
-                or "UNAVAILABLE" in error_message
-                or "429" in error_message
-                or "RESOURCE_EXHAUSTED" in error_message
+            print(
+                f"✅ Modelo {model} funcionou!",
+                flush=True
             )
 
-            if not is_retryable:
-                raise
+            return response
 
-            if attempt == max_retries - 1:
-                print(
-                    "❌ Gemini continua indisponível "
-                    "após várias tentativas.",
-                    flush=True,
-                )
-                raise
+        except Exception as e:
 
-            wait_seconds = 5 ** attempt
+            last_error = e
 
             print(
-                f"⚠️ Gemini temporariamente indisponível. "
-                f"Nova tentativa em {wait_seconds}s...",
-                flush=True,
+                f"❌ Modelo {model} falhou:",
+                flush=True
             )
 
-            time.sleep(wait_seconds)
+            print(
+                f"   {e}",
+                flush=True
+            )
 
+            print(
+                "⏭️ Pulando para o próximo modelo...",
+                flush=True
+            )
+
+    raise RuntimeError(
+        "❌ Todos os modelos Gemini falharam."
+    ) from last_error
 # =========================
 # MAIN
 # =========================
@@ -468,10 +480,11 @@ config = {
     "response_schema": EditResult,
 }
 
-response = generate_with_retry(
+response = generate_with_models(
     client,
     prompt,
     config,
+    MODELS,
 )
 
 # =========================
