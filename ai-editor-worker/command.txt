@@ -1,0 +1,3 @@
+gcloud run jobs execute ai-editor-worker \
+--region=southamerica-east1 \
+--wait

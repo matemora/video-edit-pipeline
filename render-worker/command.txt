@@ -1,0 +1,3 @@
+gcloud run jobs execute render-worker \
+--region=southamerica-east1 \
+--wait
