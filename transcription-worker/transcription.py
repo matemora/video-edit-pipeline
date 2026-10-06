@@ -100,7 +100,7 @@ def find_input_video():
     videos = [
         blob
         for blob in blobs
-        if blob.name.lower().endswith(".mp4")
+        if blob.name.lower().endswith("video_synced.mp4")
     ]
 
     if len(videos) == 0:
