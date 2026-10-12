@@ -12,9 +12,14 @@ from google.cloud import storage
 
 BUCKET_NAME = "ai-video-editor-510018"
 
-VIDEO_PREFIX = "synced/"
-EDIT_PREFIX = "edits/"
-OUTPUT_PREFIX = "final/"
+PROJECT_NAME = os.environ.get("PROJECT_NAME")
+
+if not PROJECT_NAME:
+    raise ValueError("A variável PROJECT_NAME é obrigatória.")
+
+VIDEO_PREFIX = f"synced/{PROJECT_NAME}/"
+EDIT_PREFIX = f"edits/{PROJECT_NAME}/"
+OUTPUT_PREFIX = f"final/{PROJECT_NAME}/"
 
 VIDEO_PATH = "/tmp/video.mp4"
 EDIT_PATH = "/tmp/edit.json"
@@ -45,6 +50,7 @@ def find_files(prefix, extension):
         )
 
     return files
+
 
 def download_from_gcs(gcs_uri, local_path):
     bucket_name, blob_name = (
@@ -230,6 +236,7 @@ def render_segments(video_path, segments, output_path):
 # MAIN
 # =========================
 
+
 VIDEO_BLOBS = find_files(
     VIDEO_PREFIX,
     ".mp4"
@@ -338,7 +345,7 @@ for index, video_blob in enumerate(
     output_uri = (
         f"gs://{BUCKET_NAME}/"
         f"{OUTPUT_PREFIX}"
-        f"{name_without_extension}.mp4"
+        "final.mp4"
     )
 
     print(
