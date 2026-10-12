@@ -9,15 +9,19 @@ from pydub import AudioSegment
 import whisperx
 from google.cloud import storage
 
-
 # =========================
 # CONFIGURAÇÃO
 # =========================
 
 BUCKET_NAME = "ai-video-editor-510018"
 
-INPUT_PREFIX = "synced/"
-OUTPUT_PREFIX = "transcripts/"
+PROJECT_NAME = os.environ.get("PROJECT_NAME")
+
+if not PROJECT_NAME:
+    raise ValueError("A variável PROJECT_NAME é obrigatória.")
+
+INPUT_PREFIX = f"synced/{PROJECT_NAME}/"
+OUTPUT_PREFIX = f"transcripts/{PROJECT_NAME}/"
 
 VIDEO_PATH = "/tmp/video_synced.mp4"
 AUDIO_PATH = "/tmp/audio_synced.wav"
@@ -89,33 +93,23 @@ def upload_to_gcs(local_path, gcs_uri):
     )
 
 
-def find_input_video():
-    client = storage.Client()
-    bucket = client.bucket(BUCKET_NAME)
+# =========================
+# ENTRADA E SAÍDA
+# =========================
 
-    blobs = list(
-        bucket.list_blobs(prefix=INPUT_PREFIX)
-    )
+INPUT_BLOB = f"{INPUT_PREFIX}video_synced.mp4"
 
-    videos = [
-        blob
-        for blob in blobs
-        if blob.name.lower().endswith("video_synced.mp4")
-    ]
+INPUT_URI = f"gs://{BUCKET_NAME}/{INPUT_BLOB}"
 
-    if len(videos) == 0:
-        raise RuntimeError(
-            "Nenhum vídeo encontrado em synced/"
-        )
+OUTPUT_URI = (
+    f"gs://{BUCKET_NAME}/"
+    f"{OUTPUT_PREFIX}"
+    "transcription.json"
+)
 
-    if len(videos) > 1:
-        raise RuntimeError(
-            f"Esperado apenas um vídeo em synced/, "
-            f"encontrados {len(videos)}"
-        )
-
-    return videos[0].name
-
+print("🚀 Transcription worker", flush=True)
+print(f"📁 Input: {INPUT_URI}", flush=True)
+print(f"📄 Output: {OUTPUT_URI}", flush=True)
 
 # =========================
 # EXTRAIR ÁUDIO
@@ -571,8 +565,6 @@ def transcribe_segments(
 # =========================
 # MAIN
 # =========================
-
-INPUT_BLOB = find_input_video()
 
 INPUT_URI = (
     f"gs://{BUCKET_NAME}/{INPUT_BLOB}"
