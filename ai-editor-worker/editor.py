@@ -11,8 +11,13 @@ import time
 
 BUCKET_NAME = "ai-video-editor-510018"
 
-INPUT_PREFIX = "transcripts/"
-OUTPUT_PREFIX = "edits/"
+PROJECT_NAME = os.environ.get("PROJECT_NAME")
+
+if not PROJECT_NAME:
+    raise ValueError("A variável PROJECT_NAME é obrigatória.")
+
+INPUT_PREFIX = f"transcripts/{PROJECT_NAME}/"
+OUTPUT_PREFIX = f"edits/{PROJECT_NAME}/"
 
 INPUT_PATH = "/tmp/transcription.json"
 OUTPUT_PATH = "/tmp/edit.json"
@@ -60,12 +65,12 @@ def find_input_transcription():
 
     if len(files) == 0:
         raise RuntimeError(
-            "Nenhuma transcrição encontrada em transcripts/"
+            f"Nenhuma transcrição encontrada em {INPUT_PREFIX}"
         )
 
     if len(files) > 1:
         raise RuntimeError(
-            f"Esperado apenas um JSON em transcripts/, "
+            f"Esperado apenas um JSON em {INPUT_PREFIX}, "
             f"encontrados {len(files)}"
         )
 
@@ -181,7 +186,7 @@ name_without_extension = os.path.splitext(
 OUTPUT_URI = (
     f"gs://{BUCKET_NAME}/"
     f"{OUTPUT_PREFIX}"
-    f"{name_without_extension}.json"
+    "edit.json"
 )
 
 print(
