@@ -76,22 +76,21 @@ def list_drive_files(drive, folder_id):
 
 def group_packages(files):
     packages = defaultdict(dict)
-
     for file in files:
         name = file["name"]
-
+        match = re.fullmatch(r"(.+)_screen\.mp4", name, re.I)
+        if match:
+            packages[match.group(1)]["screen"] = file
+            continue
         match = re.fullmatch(r"(.+)\.(mov|m4a)", name, re.I)
         if match:
             basename, extension = match.groups()
             packages[basename][extension.lower()] = file
             continue
-
-        match = re.fullmatch(r"(.+)_screen\.mp4", name, re.I)
+        match = re.fullmatch(r"(.+)\.mp4", name, re.I)
         if match:
-            packages[match.group(1)]["screen"] = file
-
+            packages[match.group(1)]["mp4"] = file
     return packages
-
 
 def download_drive_file(drive, file_id, destination):
     request = drive.files().get_media(fileId=file_id)
@@ -109,7 +108,7 @@ def upload_inputs(drive, storage_client, basename, package):
     prefix = f"input/{basename}/"
 
     with tempfile.TemporaryDirectory() as temp_dir:
-        for extension in ("mov", "m4a", "screen"):
+        for extension in ("mov", "m4a", "mp4", "screen"):
             file = package.get(extension)
 
             if not file:
@@ -192,10 +191,34 @@ def ensure_screen_synced(storage_client, basename):
     return True
 
 
+def ensure_video_synced(storage_client, basename, package):
+    """Prepara vídeos isolados com áudio embutido sem executar o sync-worker."""
+    bucket = storage_client.bucket(BUCKET_NAME)
+    destination_name = f"synced/{basename}/video_synced.mp4"
+    destination = bucket.blob(destination_name)
+
+    if destination.exists():
+        print(f"⏭️ Vídeo já preparado: {destination_name}", flush=True)
+        return
+
+    source_file = package.get("mp4") or package.get("mov")
+    if not source_file:
+        raise RuntimeError(f"Vídeo isolado não encontrado em input/{basename}/")
+
+    source_name = f"input/{basename}/{source_file['name']}"
+    source = bucket.blob(source_name)
+    if not source.exists():
+        raise RuntimeError(f"Vídeo de entrada não encontrado: gs://{BUCKET_NAME}/{source_name}")
+
+    bucket.copy_blob(source, bucket, destination_name)
+    print(f"✅ Vídeo copiado para synced sem sync-worker: {destination_name}", flush=True)
+
+
 def download_gcs_file(storage_client, object_name, destination):
     storage_client.bucket(BUCKET_NAME).blob(
         object_name
     ).download_to_filename(destination)
+
 
 
 # =========================
@@ -246,15 +269,14 @@ def run_job(
     )
 
 
-def run_pipeline(credentials, storage_client, basename):
+def run_pipeline(credentials, storage_client, basename, package):
     prefix = f"gs://{BUCKET_NAME}"
-
-    # 1. SYNC
     synced_object = f"synced/{basename}/video_synced.mp4"
 
     if object_exists(storage_client, synced_object):
-        print("⏭️ Sync já concluído; pulando.", flush=True)
-    else:
+        print("⏭️ Vídeo já preparado; pulando sync.", flush=True)
+    elif "mov" in package and "m4a" in package:
+        # Fluxo legado: sincroniza vídeo com áudio externo.
         run_job(
             credentials,
             "sync-worker",
@@ -265,6 +287,9 @@ def run_pipeline(credentials, storage_client, basename):
                 "OUTPUT": f"{prefix}/{synced_object}",
             },
         )
+    else:
+        # Vídeo isolado: o áudio já está embutido e sincronizado.
+        ensure_video_synced(storage_client, basename, package)
 
     # 2. TRANSCRIÇÃO
     transcript_object = (
@@ -399,9 +424,15 @@ def process_package(
     basename,
     package,
 ):
-    if "mov" not in package or "m4a" not in package:
+    has_legacy_pair = "mov" in package and "m4a" in package
+    has_embedded_audio_video = (
+        "mp4" in package
+        or ("mov" in package and "m4a" not in package)
+    )
+    if not has_legacy_pair and not has_embedded_audio_video:
         print(
-            f"SKIP {basename}: falta .mov ou .m4a",
+            f"SKIP {basename}: pacote sem vídeo válido "
+            "(.mov + .m4a ou vídeo isolado com áudio embutido).",
             flush=True,
         )
         return
@@ -491,6 +522,7 @@ def process_package(
         credentials,
         storage_client,
         basename,
+        package,
     )
 
     print(
