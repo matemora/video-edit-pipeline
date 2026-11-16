@@ -152,6 +152,46 @@ def object_exists(storage_client, object_name):
     ).exists()
 
 
+def ensure_screen_synced(storage_client, basename):
+    bucket = storage_client.bucket(BUCKET_NAME)
+
+    source_name = (
+        f"input/{basename}/{basename}_screen.mp4"
+    )
+    destination_name = (
+        f"synced/{basename}/screen_synced.mp4"
+    )
+
+    source = bucket.blob(source_name)
+    destination = bucket.blob(destination_name)
+
+    if not source.exists():
+        print(
+            f"⏭️ Screen não encontrado: {source_name}",
+            flush=True,
+        )
+        return False
+
+    if destination.exists():
+        print(
+            f"⏭️ Screen já existe: {destination_name}",
+            flush=True,
+        )
+        return True
+
+    bucket.copy_blob(
+        source,
+        bucket,
+        destination_name,
+    )
+
+    print(
+        f"✅ Screen copiado para: {destination_name}",
+        flush=True,
+    )
+    return True
+
+
 def download_gcs_file(storage_client, object_name, destination):
     storage_client.bucket(BUCKET_NAME).blob(
         object_name
@@ -351,6 +391,7 @@ def publish_final(drive, storage_client, basename, replace_existing):
 # PROCESSAR PACOTE
 # =========================
 
+
 def process_package(
     credentials,
     drive,
@@ -366,22 +407,13 @@ def process_package(
         return
 
     final_object = f"final/{basename}/final.mp4"
+    screen_final_object = f"final/{basename}/screen_final.mp4"
 
     print(f"\n{'=' * 60}", flush=True)
     print(f"Projeto: {basename}", flush=True)
     print(f"{'=' * 60}", flush=True)
 
-    # Um resultado final existente não é processado novamente.
-    if object_exists(storage_client, final_object):
-        print(
-            "Vídeo final já existe no GCS; "
-            "verificando publicação no Drive.",
-            flush=True,
-        )
-
-        return
-
-    # Se ainda não há resultado final, executa o pipeline completo.
+    # Garantir que as entradas estejam no GCS.
     upload_inputs(
         drive,
         storage_client,
@@ -389,7 +421,77 @@ def process_package(
         package,
     )
 
-    run_pipeline(credentials, storage_client, basename)
+    # Copiar o screen para synced, se existir.
+    has_screen = ensure_screen_synced(
+        storage_client,
+        basename,
+    )
+
+    main_exists = object_exists(
+        storage_client,
+        final_object,
+    )
+
+    screen_final_exists = object_exists(
+        storage_client,
+        screen_final_object,
+    )
+
+    # O vídeo principal já está pronto.
+    if main_exists:
+        if not has_screen:
+            print(
+                "Vídeo principal já existe e não há screen. "
+                "Nada a fazer.",
+                flush=True,
+            )
+            return
+
+        if screen_final_exists:
+            print(
+                "Vídeo principal e screen final já existem. "
+                "Nada a fazer.",
+                flush=True,
+            )
+            return
+
+        screen_synced_object = (
+            f"synced/{basename}/screen_synced.mp4"
+        )
+
+        if not object_exists(
+            storage_client,
+            screen_synced_object,
+        ):
+            raise RuntimeError(
+                "Screen de entrada existe, mas "
+                f"{screen_synced_object} não foi encontrado."
+            )
+
+        print(
+            "Vídeo principal já existe. "
+            "Executando somente a renderização do screen.",
+            flush=True,
+        )
+
+        run_job(
+            credentials,
+            "render-worker",
+            RENDER_REGION,
+            {
+                "PROJECT_NAME": basename,
+                "SCREEN_ONLY": "true",
+            },
+        )
+
+        return
+
+    # Sem vídeo final, executar o pipeline normal.
+    run_pipeline(
+        credentials,
+        storage_client,
+        basename,
+    )
 
     print(
         f"\nProjeto {basename} concluído!",

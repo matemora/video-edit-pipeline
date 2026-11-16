@@ -25,6 +25,9 @@ VIDEO_PATH = "/tmp/video.mp4"
 EDIT_PATH = "/tmp/edit.json"
 OUTPUT_PATH = "/tmp/final.mp4"
 
+SCREEN_ONLY = (
+    os.environ.get("SCREEN_ONLY", "false").lower() == "true"
+)
 
 # =========================
 # GCS
@@ -237,10 +240,34 @@ def render_segments(video_path, segments, output_path):
 # =========================
 
 
+
 VIDEO_BLOBS = find_files(
     VIDEO_PREFIX,
     ".mp4"
 )
+
+# O render principal deve processar somente o vídeo da câmera.
+VIDEO_BLOBS = [
+    blob
+    for blob in VIDEO_BLOBS
+    if os.path.basename(blob) == "video_synced.mp4"
+]
+
+if len(VIDEO_BLOBS) != 1:
+    raise RuntimeError(
+        f"Esperado exatamente um video_synced.mp4 em "
+        f"{VIDEO_PREFIX}; encontrados {len(VIDEO_BLOBS)}"
+    )
+
+SCREEN_BLOB = (
+    f"synced/{PROJECT_NAME}/screen_synced.mp4"
+)
+
+client = storage.Client()
+bucket = client.bucket(BUCKET_NAME)
+
+SCREEN_EXISTS = bucket.blob(SCREEN_BLOB).exists()
+
 
 EDIT_BLOBS = find_files(
     EDIT_PREFIX,
@@ -322,107 +349,166 @@ print(
 # RENDER CADA VÍDEO
 # =========================
 
-for index, video_blob in enumerate(
-    VIDEO_BLOBS,
-    1
-):
-    video_uri = (
-        f"gs://{BUCKET_NAME}/{video_blob}"
+if not SCREEN_ONLY:
+    for index, video_blob in enumerate(
+        VIDEO_BLOBS,
+        1
+    ):
+        video_uri = (
+            f"gs://{BUCKET_NAME}/{video_blob}"
+        )
+
+        filename = os.path.basename(
+            video_blob
+        )
+
+        name_without_extension = (
+            os.path.splitext(filename)[0]
+        )
+
+        output_path = (
+            f"/tmp/{name_without_extension}_final.mp4"
+        )
+
+        output_uri = (
+            f"gs://{BUCKET_NAME}/"
+            f"{OUTPUT_PREFIX}"
+            "final.mp4"
+        )
+
+        print(
+            "\n" + "=" * 60,
+            flush=True
+        )
+
+        print(
+            f"🎬 Vídeo {index}/{len(VIDEO_BLOBS)}",
+            flush=True
+        )
+
+        print(
+            f"📥 Input: {video_uri}",
+            flush=True
+        )
+
+        print(
+            f"📤 Output: {output_uri}",
+            flush=True
+        )
+
+        print(
+            "=" * 60,
+            flush=True
+        )
+
+        # =========================
+        # DOWNLOAD VIDEO
+        # =========================
+
+        download_from_gcs(
+            video_uri,
+            VIDEO_PATH
+        )
+
+        print(
+            "✅ Vídeo baixado.",
+            flush=True
+        )
+
+        # =========================
+        # RENDER
+        # =========================
+
+        render_segments(
+            VIDEO_PATH,
+            segments,
+            output_path
+        )
+
+        print(
+            "✅ Render concluído!",
+            flush=True
+        )
+
+        # =========================
+        # UPLOAD
+        # =========================
+
+        upload_to_gcs(
+            output_path,
+            output_uri
+        )
+
+        print(
+            f"🎉 Vídeo enviado: {output_uri}",
+            flush=True
+        )
+
+        # Limpar arquivo anterior antes do próximo vídeo
+        if os.path.exists(VIDEO_PATH):
+            os.remove(VIDEO_PATH)
+
+        if os.path.exists(output_path):
+            os.remove(output_path)
+
+
+# =========================
+# RENDER DO SCREEN (OPCIONAL)
+# =========================
+
+if SCREEN_EXISTS:
+    screen_uri = (
+        f"gs://{BUCKET_NAME}/{SCREEN_BLOB}"
     )
 
-    filename = os.path.basename(
-        video_blob
-    )
+    screen_input_path = "/tmp/screen_input.mp4"
+    screen_output_path = "/tmp/screen_final.mp4"
 
-    name_without_extension = (
-        os.path.splitext(filename)[0]
-    )
-
-    output_path = (
-        f"/tmp/{name_without_extension}_final.mp4"
-    )
-
-    output_uri = (
+    screen_output_uri = (
         f"gs://{BUCKET_NAME}/"
-        f"{OUTPUT_PREFIX}"
-        "final.mp4"
+        f"{OUTPUT_PREFIX}screen_final.mp4"
     )
 
     print(
-        "\n" + "=" * 60,
-        flush=True
+        "\n🖥️ Renderizando screen...",
+        flush=True,
     )
-
-    print(
-        f"🎬 Vídeo {index}/{len(VIDEO_BLOBS)}",
-        flush=True
-    )
-
-    print(
-        f"📥 Input: {video_uri}",
-        flush=True
-    )
-
-    print(
-        f"📤 Output: {output_uri}",
-        flush=True
-    )
-
-    print(
-        "=" * 60,
-        flush=True
-    )
-
-    # =========================
-    # DOWNLOAD VIDEO
-    # =========================
 
     download_from_gcs(
-        video_uri,
-        VIDEO_PATH
+        screen_uri,
+        screen_input_path,
     )
-
-    print(
-        "✅ Vídeo baixado.",
-        flush=True
-    )
-
-    # =========================
-    # RENDER
-    # =========================
 
     render_segments(
-        VIDEO_PATH,
+        screen_input_path,
         segments,
-        output_path
+        screen_output_path,
     )
-
-    print(
-        "✅ Render concluído!",
-        flush=True
-    )
-
-    # =========================
-    # UPLOAD
-    # =========================
 
     upload_to_gcs(
-        output_path,
-        output_uri
+        screen_output_path,
+        screen_output_uri,
     )
 
     print(
-        f"🎉 Vídeo enviado: {output_uri}",
-        flush=True
+        f"✅ Screen renderizado: {screen_output_uri}",
+        flush=True,
     )
 
-    # Limpar arquivo anterior antes do próximo vídeo
-    if os.path.exists(VIDEO_PATH):
-        os.remove(VIDEO_PATH)
+    for path in (
+        screen_input_path,
+        screen_output_path,
+    ):
+        if os.path.exists(path):
+            os.remove(path)
 
-    if os.path.exists(output_path):
-        os.remove(output_path)
-
+else:
+    print(
+        f"⏭️ Screen não encontrado em "
+        f"gs://{BUCKET_NAME}/{SCREEN_BLOB}; "
+        "pulando renderização do screen.",
+        flush=True,
+    )
 
 print(
     "\n🎉 Render Worker concluído!",
