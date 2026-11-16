@@ -115,10 +115,25 @@ def group_packages(files):
     normalized = {}
     for basename, package in packages.items():
         if package["takes"] and package.get("legacy"):
-            raise ValueError(
-                f"Projeto {basename} mistura arquivos sem número e takes numerados. "
-                "Use somente arquivos _1, _2... ou somente arquivos sem sufixo."
-            )
+            legacy = package["legacy"]
+            # Permite um único áudio sem número apenas quando há exatamente
+            # um take sem áudio pareado, eliminando a ambiguidade.
+            if set(legacy) == {"m4a"}:
+                missing_audio = [
+                    take for take in package["takes"] if take.get("audio") is None
+                ]
+                if len(missing_audio) == 1:
+                    missing_audio[0]["audio"] = legacy["m4a"]
+                else:
+                    raise ValueError(
+                        f"Áudio sem número em {basename} é ambíguo: "
+                        f"{len(missing_audio)} takes não possuem áudio pareado."
+                    )
+            else:
+                raise ValueError(
+                    f"Projeto {basename} mistura arquivos sem número e takes numerados. "
+                    "Use somente arquivos _1, _2... ou somente arquivos sem sufixo."
+                )
         if package["takes"]:
             package["takes"].sort(key=lambda item: item["number"])
             normalized[basename] = package
