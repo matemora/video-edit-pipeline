@@ -1,27 +1,19 @@
-import os
 import json
+import os
+
 from google import genai
 from google.cloud import storage
-from pydantic import BaseModel
-import time
-
-# =========================
-# CONFIGURAÇÃO
-# =========================
+from pydantic import BaseModel, Field
 
 BUCKET_NAME = "ai-video-editor-510018"
-
 PROJECT_NAME = os.environ.get("PROJECT_NAME")
-
 if not PROJECT_NAME:
     raise ValueError("A variável PROJECT_NAME é obrigatória.")
 
 INPUT_PREFIX = f"transcripts/{PROJECT_NAME}/"
 OUTPUT_PREFIX = f"edits/{PROJECT_NAME}/"
-
 INPUT_PATH = "/tmp/transcription.json"
 OUTPUT_PATH = "/tmp/edit.json"
-
 MODELS = [
     "gemini-3.8-flash",
     "gemini-3.6-flash",
@@ -29,10 +21,7 @@ MODELS = [
     "gemini-3.0-flash",
     "gemini-2.5-flash",
 ]
-
-# =========================
-# OUTPUT STRUCTURE
-# =========================
+TIMESTAMP_TOLERANCE = 0.002
 
 
 class EditSegment(BaseModel):
@@ -45,511 +34,320 @@ class EditResult(BaseModel):
     video: str = PROJECT_NAME
     segments: list[EditSegment]
 
-# =========================
-# GCS
-# =========================
+
+class SemanticGroup(BaseModel):
+    label: str = Field(description="Resumo curto da fala ou ideia.")
+    segment_indices: list[int] = Field(description="Índices das tentativas equivalentes.")
+
+
+class GroupingResult(BaseModel):
+    groups: list[SemanticGroup]
+
+
+class SelectedClip(BaseModel):
+    segment_index: int
+    source: str
+    start: float
+    end: float
+
+
+class SelectionResult(BaseModel):
+    clips: list[SelectedClip]
 
 
 def find_input_transcription():
-    client = storage.Client()
-    bucket = client.bucket(BUCKET_NAME)
-
-    blobs = list(
-        bucket.list_blobs(prefix=INPUT_PREFIX)
-    )
-
+    bucket = storage.Client().bucket(BUCKET_NAME)
     files = [
-        blob
-        for blob in blobs
+        blob for blob in bucket.list_blobs(prefix=INPUT_PREFIX)
         if blob.name.lower().endswith(".json")
     ]
-
-    if len(files) == 0:
-        raise RuntimeError(
-            f"Nenhuma transcrição encontrada em {INPUT_PREFIX}"
-        )
-
+    if not files:
+        raise RuntimeError(f"Nenhuma transcrição encontrada em {INPUT_PREFIX}")
     if len(files) > 1:
         raise RuntimeError(
-            f"Esperado apenas um JSON em {INPUT_PREFIX}, "
-            f"encontrados {len(files)}"
+            f"Esperado apenas um JSON em {INPUT_PREFIX}, encontrados {len(files)}"
         )
-
     return files[0].name
 
 
 def download_from_gcs(gcs_uri, local_path):
-    bucket_name, blob_name = (
-        gcs_uri.replace("gs://", "", 1).split("/", 1)
-    )
-
-    client = storage.Client()
-    bucket = client.bucket(bucket_name)
-    blob = bucket.blob(blob_name)
-
-    print(
-        f"📥 Downloading {gcs_uri}...",
-        flush=True
-    )
-
-    blob.download_to_filename(local_path)
+    bucket_name, blob_name = gcs_uri.replace("gs://", "", 1).split("/", 1)
+    storage.Client().bucket(bucket_name).blob(blob_name).download_to_filename(local_path)
+    print(f"📥 Download concluído: {gcs_uri}", flush=True)
 
 
 def upload_to_gcs(local_path, gcs_uri):
-    bucket_name, blob_name = (
-        gcs_uri.replace("gs://", "", 1).split("/", 1)
+    bucket_name, blob_name = gcs_uri.replace("gs://", "", 1).split("/", 1)
+    storage.Client().bucket(bucket_name).blob(blob_name).upload_from_filename(
+        local_path, content_type="application/json"
     )
-
-    client = storage.Client()
-    bucket = client.bucket(bucket_name)
-    blob = bucket.blob(blob_name)
-
-    print(
-        f"📤 Uploading {local_path} → {gcs_uri}...",
-        flush=True
-    )
-
-    blob.upload_from_filename(
-        local_path,
-        content_type="application/json",
-    )
+    print(f"📤 Upload concluído: {gcs_uri}", flush=True)
 
 
-def generate_with_models(
-    client,
-    prompt,
-    config,
-    models
-):
+def generate_with_models(client, prompt, response_schema, stage_name):
     last_error = None
-
-    for index, model in enumerate(models, 1):
-
-        print(
-            f"\n🤖 Modelo {index}/{len(models)}: {model}",
-            flush=True
-        )
-
+    config = {
+        "response_mime_type": "application/json",
+        "response_schema": response_schema,
+    }
+    for index, model in enumerate(MODELS, 1):
+        print(f"\n🤖 {stage_name} — modelo {index}/{len(MODELS)}: {model}", flush=True)
         try:
-
             response = client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=config,
+                model=model, contents=prompt, config=config
             )
-
-            print(
-                f"✅ Modelo {model} funcionou!",
-                flush=True
-            )
-
+            print(f"✅ {stage_name} concluída com {model}", flush=True)
             return response
-
-        except Exception as e:
-
-            last_error = e
-
-            print(
-                f"❌ Modelo {model} falhou:",
-                flush=True
-            )
-
-            print(
-                f"   {e}",
-                flush=True
-            )
-
-            print(
-                "⏭️ Pulando para o próximo modelo...",
-                flush=True
-            )
-
-    raise RuntimeError(
-        "❌ Todos os modelos Gemini falharam."
-    ) from last_error
-# =========================
-# MAIN
-# =========================
+        except Exception as error:
+            last_error = error
+            print(f"❌ {stage_name}: {model} falhou: {error}", flush=True)
+    raise RuntimeError(f"Todos os modelos Gemini falharam na etapa: {stage_name}") from last_error
 
 
-INPUT_BLOB = find_input_transcription()
+def build_grouping_prompt(transcription):
+    indexed_segments = [
+        {"index": index, **segment}
+        for index, segment in enumerate(transcription["segments"])
+    ]
+    return f"""
+Você é um analista de transcrição para edição de vídeo.
+Identifique quais segmentos são tentativas alternativas da MESMA fala ou ideia.
+NÃO escolha ainda a melhor tentativa e NÃO monte a edição final.
 
-INPUT_URI = (
-    f"gs://{BUCKET_NAME}/{INPUT_BLOB}"
-)
-
-filename = os.path.basename(INPUT_BLOB)
-
-name_without_extension = os.path.splitext(
-    filename
-)[0]
-
-OUTPUT_URI = (
-    f"gs://{BUCKET_NAME}/"
-    f"{OUTPUT_PREFIX}"
-    "edit.json"
-)
-
-print(
-    "🚀 AI Editor worker",
-    flush=True
-)
-
-print(
-    f"📁 Input: {INPUT_URI}",
-    flush=True
-)
-
-print(
-    f"📄 Output: {OUTPUT_URI}",
-    flush=True
-)
-
-# =========================
-# DOWNLOAD
-# =========================
-
-download_from_gcs(
-    INPUT_URI,
-    INPUT_PATH
-)
-
-print(
-    "✅ Transcrição baixada.",
-    flush=True
-)
-
-# =========================
-# CARREGAR JSON
-# =========================
-
-with open(
-    INPUT_PATH,
-    "r",
-    encoding="utf-8"
-) as f:
-    transcription = json.load(f)
-
-# Compatibilidade com transcrições geradas antes do suporte a múltiplos takes.
-for segment in transcription.get("segments", []):
-    segment.setdefault("source", "video_synced.mp4")
-
-print(
-    f"📝 Segmentos recebidos: "
-    f"{len(transcription['segments'])}",
-    flush=True
-)
-
-# =========================
-# GEMINI
-# =========================
-
-api_key = os.environ.get("GEMINI_API_KEY")
-
-if not api_key:
-    raise RuntimeError(
-        "GEMINI_API_KEY não configurada."
-    )
-
-client = genai.Client(
-    api_key=api_key
-)
-
-# =========================
-# PROMPT
-# =========================
-
-prompt = f"""
-Você é o editor responsável por montar o roteiro final
-de um vídeo a partir de uma gravação contendo várias
-tentativas do apresentador.
-
-A transcrição abaixo contém segmentos de vários arquivos, com timestamps
-originais de cada vídeo, timestamps individuais por palavra e o campo source
-que identifica o nome exato do arquivo de origem.
-
-OBJETIVO:
-
-Montar o vídeo final mais conciso, natural e coerente
-possível usando somente trechos existentes na gravação.
-
-O resultado deve parecer uma gravação única e bem editada,
-mesmo que tenha sido construído a partir de várias tentativas.
-
-COMO A GRAVAÇÃO FUNCIONA:
-
-O apresentador normalmente grava uma ideia várias vezes.
-
-O padrão costuma ser:
-
-tentativa 1
-tentativa 2
-tentativa 3
-...
-melhor tentativa
-→ próxima ideia
-
-Por isso, quando existirem várias tentativas da mesma ideia,
-você deve identificar qual delas funciona melhor.
-
-IMPORTANTE:
-
-Um segmento da transcrição NÃO é necessariamente uma unidade
-indivisível de edição.
-
-Você pode usar apenas uma parte de um segmento quando isso
-produzir uma edição melhor.
-
-Por exemplo, se um segmento contém:
-
-"Existe o Git. O Git é uma ferramenta..."
-
-e depois existe outro take contendo:
-
-"O Git é uma ferramenta que vai permitir..."
-
-você pode manter o primeiro segmento somente até
-"Existe o Git." e descartar a continuação "O Git é uma
-ferramenta...".
-
-Isso é especialmente importante quando o apresentador
-começa uma frase, percebe que quer refazê-la e imediatamente
-repete a mesma frase em outro take.
+CONTEXTO:
+O apresentador pode gravar a mesma fala várias vezes em arquivos diferentes.
+Cada segmento tem timestamps locais ao arquivo indicado em "source".
 
 REGRAS:
+1. Agrupe segmentos de takes diferentes quando forem tentativas da mesma fala,
+   explicação ou unidade de conteúdo, mesmo com pequenas diferenças de palavras.
+2. O critério é a intenção e o conteúdo, não igualdade literal do texto.
+3. Não agrupe frases só porque começam com palavras iguais.
+4. Não agrupe partes que são continuação natural uma da outra.
+5. Não agrupe ideias diferentes só porque tratam do mesmo assunto.
+6. Cada grupo pode conter uma única entrada quando não houver alternativa.
+7. Cada índice deve aparecer exatamente uma vez na resposta.
+8. Não omita segmentos e não invente índices.
+9. Use os índices como identificadores, nunca timestamps.
+10. Não favoreça o take mais recente nem qualquer arquivo específico.
+11. Retorne grupos em ordem aproximada da sequência de conteúdo final.
+12. O label deve resumir a fala/ideia comum do grupo.
 
-1. Escolha apenas os trechos que devem permanecer no vídeo.
+Retorne somente JSON no schema solicitado.
 
-2. NÃO retorne trechos descartados.
-
-3. Remova repetições da mesma informação.
-
-4. Remova erros, hesitações, frases incompletas e tentativas
-   claramente abandonadas.
-
-5. Quando houver várias tentativas da mesma ideia, prefira
-   o melhor take completo.
-
-6. Normalmente o melhor take é o mais recente, pois o
-   apresentador costuma repetir até acertar. Porém, isso
-   NÃO é uma regra absoluta. Analise o conteúdo e escolha
-   o take que melhor funciona.
-
-7. Um take pode ser parcialmente aproveitado.
-
-   Se apenas o início de um segmento for útil, escolha
-   somente esse início.
-
-   Se apenas o final de um segmento for útil, escolha
-   somente esse final.
-
-   Não descarte obrigatoriamente o segmento inteiro apenas
-   porque uma parte dele contém uma tentativa repetida.
-
-8. Quando um apresentador termina uma ideia e imediatamente
-   começa a repetir ou refazer a próxima frase, corte o
-   segmento exatamente antes do início da repetição.
-
-9. Use os timestamps das palavras para encontrar pontos
-   precisos de corte.
-
-10. Quando fizer um corte dentro de um segmento, o timestamp
-    "end" deve ser exatamente o "end" de uma palavra existente
-    na transcrição.
-
-11. Quando fizer um corte interno, o timestamp "start" também
-    deve ser exatamente o "start" de uma palavra existente,
-    exceto quando estiver usando o início original de um
-    segmento.
-
-12. NÃO invente timestamps.
-
-13. Todos os timestamps retornados devem existir na
-    transcrição fornecida ou corresponder exatamente aos
-    timestamps "start" ou "end" de palavras existentes.
-
-14. Você pode selecionar trechos de takes diferentes. Cada trecho
-    retornado deve preservar o campo source exato do segmento de
-    transcrição correspondente. Nunca use timestamps de um arquivo
-    como se fossem de outro.
-
-15. Preserve a ordem original das ideias.
-
-16. Se uma ideia já foi explicada em um take escolhido,
-    não escolha outro take que repita a mesma explicação.
-
-17. Frases que começam de maneira semelhante NÃO são
-    necessariamente duplicadas. Analise o conteúdo completo
-    antes de decidir.
-
-18. Uma frase repetida pode ser necessária quando ela aparece
-    como continuação natural de uma ideia anterior.
-
-19. Diferencie entre:
-
-    A) repetição descartável:
-       o apresentador repete uma frase para tentar novamente;
-
-    B) repetição necessária:
-       a mesma expressão aparece novamente porque faz parte
-       da estrutura natural da explicação.
-
-20. Quando houver uma tentativa incompleta seguida de uma
-    tentativa melhor e completa, prefira a tentativa completa
-    para aquela ideia, mas preserve a parte anterior da
-    tentativa incompleta se ela contiver conteúdo útil que
-    não foi repetido.
-
-EXEMPLO DE RACIOCÍNIO:
-
-Se existir:
-
-[61.627 -> 73.485]
-"Para a gente manter esse histórico... existe o Git.
-O Git é uma ferramenta,"
-
-e depois:
-
-[77.378 -> 78.468]
-"O Git é uma ferramenta"
-
-e depois:
-
-[86.892 -> 91.237]
-"O Git é uma ferramenta que vai permitir você fazer
-o versionamento do seu código."
-
-o primeiro segmento pode ser cortado em:
-
-[61.627 -> 71.740]
-
-porque "existe o Git." completa a ideia anterior.
-
-Depois pode ser escolhido:
-
-[86.892 -> 91.237]
-
-para explicar o que é o Git.
-
-Nesse caso, NÃO mantenha:
-
-[72.141 -> 73.485]
-"O Git é uma ferramenta,"
-
-porque essa frase está sendo refeita no take posterior.
-
-IMPORTANTE SOBRE OS TIMESTAMPS:
-
-Cada objeto retornado em "segments" representa EXATAMENTE
-um trecho que será enviado ao renderizador.
-Inclua obrigatoriamente "source" com o nome exato do arquivo de origem.
-
-O renderizador aceitará qualquer combinação válida de
-"start" e "end".
-
-Portanto, os limites de um segmento podem ser diferentes
-dos limites do segmento original da transcrição.
-
-FORMATO DA RESPOSTA:
-
-Retorne SOMENTE JSON válido neste formato:
-
-{json.dumps({
-  "segments": [
-    {
-      "source": "take_001.mp4",
-      "start": 61.627,
-      "end": 71.740
-    },
-    {
-      "source": "take_002.mp4",
-      "start": 86.892,
-      "end": 91.237
-    }
-  ]
-}, ensure_ascii=False, indent=2)}
-
-Não inclua texto explicativo.
-Não inclua comentários.
-Não inclua markdown.
-
-TRANSCRIÇÃO:
-
-{json.dumps(
-    transcription,
-    ensure_ascii=False,
-    indent=2
-)}
+TRANSCRIÇÃO INDEXADA:
+{json.dumps(indexed_segments, ensure_ascii=False, indent=2)}
 """
 
-# =========================
-# GERAR EDIÇÃO
-# =========================
 
-print(
-    "\n🤖 Enviando transcrição para Gemini...",
-    flush=True
-)
+def build_selection_prompt(transcription, grouping):
+    segments = transcription["segments"]
+    groups_with_segments = []
+    for group_index, group in enumerate(grouping.groups):
+        candidates = [
+            {"index": segment_index, **segments[segment_index]}
+            for segment_index in group.segment_indices
+        ]
+        groups_with_segments.append({
+            "group_index": group_index,
+            "idea": group.label,
+            "candidates": candidates,
+        })
 
-config = {
-    "response_mime_type": "application/json",
-    "response_schema": EditResult,
-}
+    return f"""
+Você é o editor responsável por montar a edição final de um vídeo gravado em
+vários takes. A etapa anterior agrupou alternativas da mesma fala/ideia.
+Compare as alternativas e escolha os trechos que formarão o vídeo.
 
-response = generate_with_models(
-    client,
-    prompt,
-    config,
-    MODELS,
-)
+COMO ESCOLHER:
+1. Compare alternativas dentro de cada grupo: completude, clareza, naturalidade,
+   fluidez, ritmo, entonação sugerida pelo texto e ausência de hesitações.
+2. Escolha a melhor interpretação COMPLETA para cada ideia.
+3. Não misture palavras de versões diferentes para fabricar uma fala que nunca
+   foi gravada.
+4. Não existe preferência pelo take mais recente, antigo ou por arquivo.
+5. Não force o uso de todos os takes. Um único take pode ser a melhor escolha.
+6. Preserve conteúdo único que não esteja repetido em outro grupo.
+7. Remova repetições descartáveis, tentativas abandonadas, erros e hesitações.
+8. Preserve a ordem lógica das ideias, não a ordem numérica dos takes.
+9. Um segmento pode ser parcialmente aproveitado se contiver conteúdo útil
+   seguido de repetição ou tentativa abandonada.
+10. Não crie falas, reescreva a transcrição ou invente timestamps.
+11. Cada clip deve apontar para o índice do segmento original que o contém.
+12. Copie o source exatamente do segmento apontado.
+13. start e end devem estar dentro do intervalo do segmento original.
+14. Os limites devem ser o início/fim original do segmento ou timestamps
+    start/end de palavras existentes nele.
+15. start deve ser menor que end.
+16. Um grupo pode ser descartado se não tiver conteúdo aproveitável.
+17. Não selecione duas alternativas completas do mesmo grupo. Só use mais de
+    um clip do grupo se forem partes distintas, não repetidas e necessárias.
+18. Prefira uma frase completa em uma única gravação.
+19. Não escolha uma interpretação inferior apenas para variar os takes.
 
-# =========================
-# VALIDAR RESULTADO
-# =========================
+A edição deve soar como uma explicação única, coerente e natural.
+Retorne somente JSON no schema solicitado, com "clips". Cada clip contém
+segment_index, source, start e end. A ordem dos clips será a edição final.
 
-result = EditResult.model_validate_json(
-    response.text
-)
+GRUPOS E CANDIDATOS:
+{json.dumps(groups_with_segments, ensure_ascii=False, indent=2)}
+"""
 
-# =========================
-# SALVAR JSON
-# =========================
 
-output = result.model_dump()
+def validate_grouping(grouping, segment_count):
+    seen = []
+    for group in grouping.groups:
+        if not group.segment_indices:
+            raise ValueError(f"Grupo sem segmentos: {group.label}")
+        seen.extend(group.segment_indices)
 
-with open(
-    OUTPUT_PATH,
-    "w",
-    encoding="utf-8"
-) as f:
-    json.dump(
-        output,
-        f,
-        ensure_ascii=False,
-        indent=2
+    expected = set(range(segment_count))
+    actual = set(seen)
+    if len(seen) != len(actual):
+        raise ValueError("O agrupamento repetiu um ou mais índices.")
+    if actual != expected:
+        raise ValueError(
+            f"Agrupamento incompleto/inválido. Ausentes={sorted(expected - actual)}; "
+            f"inválidos={sorted(actual - expected)}"
+        )
+
+
+def timestamp_is_valid(value, allowed_values):
+    return any(
+        abs(float(value) - float(candidate)) <= TIMESTAMP_TOLERANCE
+        for candidate in allowed_values
     )
 
-print(
-    f"💾 JSON gerado: {OUTPUT_PATH}",
-    flush=True
-)
 
-# =========================
-# UPLOAD
-# =========================
+def validate_selection(selection, transcription):
+    source_segments = transcription["segments"]
+    validated = []
 
-upload_to_gcs(
-    OUTPUT_PATH,
-    OUTPUT_URI
-)
+    for clip_number, clip in enumerate(selection.clips, 1):
+        if not 0 <= clip.segment_index < len(source_segments):
+            raise ValueError(
+                f"Clip {clip_number}: índice inválido {clip.segment_index}"
+            )
 
-print(
-    "\n✅ AI Editor concluído!",
-    flush=True
-)
+        original = source_segments[clip.segment_index]
+        if clip.source != original["source"]:
+            raise ValueError(
+                f"Clip {clip_number}: source {clip.source!r} não corresponde "
+                f"ao segmento {clip.segment_index} ({original['source']!r})"
+            )
 
-print(
-    f"✂️ Segmentos mantidos: "
-    f"{len(result.segments)}",
-    flush=True
-)
+        start, end = float(clip.start), float(clip.end)
+        segment_start, segment_end = float(original["start"]), float(original["end"])
+        if start >= end:
+            raise ValueError(f"Clip {clip_number}: start precisa ser menor que end.")
+        if start < segment_start - TIMESTAMP_TOLERANCE:
+            raise ValueError(f"Clip {clip_number}: start fora do segmento original.")
+        if end > segment_end + TIMESTAMP_TOLERANCE:
+            raise ValueError(f"Clip {clip_number}: end fora do segmento original.")
+
+        allowed_starts = [segment_start]
+        allowed_ends = [segment_end]
+        for word in original.get("words", []):
+            if word.get("start") is not None:
+                allowed_starts.append(float(word["start"]))
+            if word.get("end") is not None:
+                allowed_ends.append(float(word["end"]))
+
+        if not timestamp_is_valid(start, allowed_starts):
+            raise ValueError(
+                f"Clip {clip_number}: start não corresponde ao início do segmento "
+                "nem ao início de uma palavra."
+            )
+        if not timestamp_is_valid(end, allowed_ends):
+            raise ValueError(
+                f"Clip {clip_number}: end não corresponde ao fim do segmento "
+                "nem ao fim de uma palavra."
+            )
+
+        validated.append(EditSegment(
+            source=original["source"],
+            start=round(start, 3),
+            end=round(end, 3),
+        ))
+    return validated
+
+
+def main():
+    input_blob = find_input_transcription()
+    input_uri = f"gs://{BUCKET_NAME}/{input_blob}"
+    output_uri = f"gs://{BUCKET_NAME}/{OUTPUT_PREFIX}edit.json"
+
+    print("🚀 AI Editor worker", flush=True)
+    print(f"📁 Input: {input_uri}", flush=True)
+    print(f"📄 Output: {output_uri}", flush=True)
+    download_from_gcs(input_uri, INPUT_PATH)
+
+    with open(INPUT_PATH, "r", encoding="utf-8") as file:
+        transcription = json.load(file)
+
+    segments = transcription.get("segments", [])
+    if not segments:
+        raise RuntimeError("A transcrição não contém segmentos.")
+
+    # Compatibilidade com transcrições anteriores ao suporte a multi-take.
+    for segment in segments:
+        segment.setdefault("source", "video_synced.mp4")
+
+    sources = sorted({segment["source"] for segment in segments})
+    print(f"📝 Segmentos recebidos: {len(segments)}", flush=True)
+    print(f"🎬 Fontes: {', '.join(sources)}", flush=True)
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY não configurada.")
+    client = genai.Client(api_key=api_key)
+
+    print("\n🔎 Etapa 1/2: agrupando falas equivalentes...", flush=True)
+    grouping_response = generate_with_models(
+        client, build_grouping_prompt(transcription),
+        GroupingResult, "Agrupamento semântico"
+    )
+    grouping = GroupingResult.model_validate_json(grouping_response.text)
+    validate_grouping(grouping, len(segments))
+
+    print(f"🧩 Grupos identificados: {len(grouping.groups)}", flush=True)
+    for index, group in enumerate(grouping.groups, 1):
+        group_sources = sorted({
+            segments[item]["source"] for item in group.segment_indices
+        })
+        print(
+            f"  Grupo {index}: {group.label} | "
+            f"segmentos={group.segment_indices} | fontes={group_sources}",
+            flush=True,
+        )
+
+    print("\n🎬 Etapa 2/2: comparando takes e montando a edição...", flush=True)
+    selection_response = generate_with_models(
+        client, build_selection_prompt(transcription, grouping),
+        SelectionResult, "Seleção e montagem"
+    )
+    selection = SelectionResult.model_validate_json(selection_response.text)
+    final_segments = validate_selection(selection, transcription)
+
+    print("\n✂️ Seleção final:", flush=True)
+    for index, segment in enumerate(final_segments, 1):
+        print(
+            f"  {index:03d}. {segment.source} "
+            f"[{segment.start:.3f} -> {segment.end:.3f}]",
+            flush=True,
+        )
+
+    result = EditResult(segments=final_segments)
+    with open(OUTPUT_PATH, "w", encoding="utf-8") as file:
+        json.dump(result.model_dump(), file, ensure_ascii=False, indent=2)
+
+    print(f"💾 JSON gerado: {OUTPUT_PATH}", flush=True)
+    upload_to_gcs(OUTPUT_PATH, output_uri)
+    print(
+        f"✅ AI Editor concluído! Segmentos mantidos: {len(result.segments)}",
+        flush=True,
+    )
+
+
+if __name__ == "__main__":
+    main()
