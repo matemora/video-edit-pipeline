@@ -191,23 +191,26 @@ def ensure_screen_synced(storage_client, basename):
     return True
 
 
-def ensure_video_synced(storage_client, basename):
+def ensure_video_synced(storage_client, basename, package):
     """Prepara vídeos isolados com áudio embutido sem executar o sync-worker."""
     bucket = storage_client.bucket(BUCKET_NAME)
     destination_name = f"synced/{basename}/video_synced.mp4"
     destination = bucket.blob(destination_name)
+
     if destination.exists():
         print(f"⏭️ Vídeo já preparado: {destination_name}", flush=True)
         return
-    mp4_name = f"input/{basename}/{basename}.mp4"
-    mov_name = f"input/{basename}/{basename}.mov"
-    if object_exists(storage_client, mp4_name):
-        source_name = mp4_name
-    elif object_exists(storage_client, mov_name):
-        source_name = mov_name
-    else:
+
+    source_file = package.get("mp4") or package.get("mov")
+    if not source_file:
         raise RuntimeError(f"Vídeo isolado não encontrado em input/{basename}/")
-    bucket.copy_blob(bucket.blob(source_name), bucket, destination_name)
+
+    source_name = f"input/{basename}/{source_file['name']}"
+    source = bucket.blob(source_name)
+    if not source.exists():
+        raise RuntimeError(f"Vídeo de entrada não encontrado: gs://{BUCKET_NAME}/{source_name}")
+
+    bucket.copy_blob(source, bucket, destination_name)
     print(f"✅ Vídeo copiado para synced sem sync-worker: {destination_name}", flush=True)
 
 
@@ -272,7 +275,7 @@ def run_pipeline(credentials, storage_client, basename, package):
 
     if object_exists(storage_client, synced_object):
         print("⏭️ Vídeo já preparado; pulando sync.", flush=True)
-    elif "m4a" in package:
+    elif "mov" in package and "m4a" in package:
         # Fluxo legado: sincroniza vídeo com áudio externo.
         run_job(
             credentials,
@@ -286,7 +289,7 @@ def run_pipeline(credentials, storage_client, basename, package):
         )
     else:
         # Vídeo isolado: o áudio já está embutido e sincronizado.
-        ensure_video_synced(storage_client, basename)
+        ensure_video_synced(storage_client, basename, package)
 
     # 2. TRANSCRIÇÃO
     transcript_object = (
