@@ -36,6 +36,7 @@ MODELS = [
 
 
 class EditSegment(BaseModel):
+    source: str
     start: float
     end: float
 
@@ -434,6 +435,7 @@ IMPORTANTE SOBRE OS TIMESTAMPS:
 
 Cada objeto retornado em "segments" representa EXATAMENTE
 um trecho que será enviado ao renderizador.
+Inclua obrigatoriamente "source" com o nome exato do arquivo de origem.
 
 O renderizador aceitará qualquer combinação válida de
 "start" e "end".
@@ -448,10 +450,12 @@ Retorne SOMENTE JSON válido neste formato:
 {json.dumps({
   "segments": [
     {
+      "source": "take_001.mp4",
       "start": 61.627,
       "end": 71.740
     },
     {
+      "source": "take_002.mp4",
       "start": 86.892,
       "end": 91.237
     }
