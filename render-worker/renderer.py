@@ -123,5 +123,25 @@ def main():
     upload_blob(bucket, output_path, OUTPUT_BLOB)
     print(f"Vídeo final publicado em gs://{BUCKET_NAME}/{OUTPUT_BLOB}", flush=True)
 
+    # Mantém a renderização opcional do screen para projetos legados de take único.
+    screen_blob = bucket.blob(SCREEN_BLOB)
+    if screen_blob.exists():
+        screen_path = "/tmp/screen.mp4"
+        download_blob(bucket, SCREEN_BLOB, screen_path)
+        screen_segments = [
+            {**segment, "source": "screen_synced.mp4"}
+            for segment in segments
+        ]
+        render_segments(
+            {"screen_synced.mp4": screen_path},
+            screen_segments,
+            "/tmp/screen_final.mp4",
+        )
+        upload_blob(
+            bucket, "/tmp/screen_final.mp4",
+            f"final/{PROJECT_NAME}/screen_final.mp4"
+        )
+        print("Screen renderizado.", flush=True)
+
 if __name__ == "__main__":
     main()
