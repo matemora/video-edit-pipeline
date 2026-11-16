@@ -42,7 +42,7 @@ class EditSegment(BaseModel):
 
 
 class EditResult(BaseModel):
-    video: str
+    video: str = PROJECT_NAME
     segments: list[EditSegment]
 
 # =========================
@@ -260,8 +260,9 @@ Você é o editor responsável por montar o roteiro final
 de um vídeo a partir de uma gravação contendo várias
 tentativas do apresentador.
 
-A transcrição abaixo contém segmentos com timestamps
-originais do vídeo e timestamps individuais para cada palavra.
+A transcrição abaixo contém segmentos de vários arquivos, com timestamps
+originais de cada vídeo, timestamps individuais por palavra e o campo source
+que identifica o nome exato do arquivo de origem.
 
 OBJETIVO:
 
@@ -363,8 +364,10 @@ REGRAS:
     transcrição fornecida ou corresponder exatamente aos
     timestamps "start" ou "end" de palavras existentes.
 
-14. Não combine dois takes diferentes para formar uma frase,
-    a menos que os trechos funcionem naturalmente juntos.
+14. Você pode selecionar trechos de takes diferentes. Cada trecho
+    retornado deve preservar o campo source exato do segmento de
+    transcrição correspondente. Nunca use timestamps de um arquivo
+    como se fossem de outro.
 
 15. Preserve a ordem original das ideias.
 
