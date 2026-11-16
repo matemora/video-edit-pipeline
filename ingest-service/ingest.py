@@ -81,12 +81,12 @@ def group_packages(files):
     for file in files:
         name = file["name"]
 
-        screen_match = re.fullmatch(r"(.+)_screen\\.mp4", name, re.I)
+        screen_match = re.fullmatch(r"(.+)_screen\.mp4", name, re.I)
         if screen_match:
             packages[screen_match.group(1)]["screen"] = file
             continue
 
-        take_match = re.fullmatch(r"(.+?)_(\\d+)\\.(mov|mp4|m4a)", name, re.I)
+        take_match = re.fullmatch(r"(.+?)_(\d+)\.(mov|mp4|m4a)", name, re.I)
         if take_match:
             basename, number, extension = take_match.groups()
             package = packages[basename]
@@ -101,7 +101,7 @@ def group_packages(files):
             take[key] = file
             continue
 
-        single_match = re.fullmatch(r"(.+)\\.(mov|mp4|m4a)", name, re.I)
+        single_match = re.fullmatch(r"(.+)\.(mov|mp4|m4a)", name, re.I)
         if single_match:
             basename, extension = single_match.groups()
             package = packages[basename]
