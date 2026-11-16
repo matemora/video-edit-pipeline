@@ -75,22 +75,61 @@ def list_drive_files(drive, folder_id):
 
 
 def group_packages(files):
-    packages = defaultdict(dict)
+    """Agrupa arquivos sem sufixo como projeto legado e arquivos _N como takes."""
+    packages = defaultdict(lambda: {"takes": [], "screen": None})
+
     for file in files:
         name = file["name"]
-        match = re.fullmatch(r"(.+)_screen\.mp4", name, re.I)
-        if match:
-            packages[match.group(1)]["screen"] = file
+
+        screen_match = re.fullmatch(r"(.+)_screen\\.mp4", name, re.I)
+        if screen_match:
+            packages[screen_match.group(1)]["screen"] = file
             continue
-        match = re.fullmatch(r"(.+)\.(mov|m4a)", name, re.I)
-        if match:
-            basename, extension = match.groups()
-            packages[basename][extension.lower()] = file
+
+        take_match = re.fullmatch(r"(.+?)_(\\d+)\\.(mov|mp4|m4a)", name, re.I)
+        if take_match:
+            basename, number, extension = take_match.groups()
+            package = packages[basename]
+            number = int(number)
+            take = next((item for item in package["takes"] if item["number"] == number), None)
+            if take is None:
+                take = {"number": number, "video": None, "audio": None}
+                package["takes"].append(take)
+            key = "audio" if extension.lower() == "m4a" else "video"
+            if take[key] is not None:
+                raise ValueError(f"Arquivo duplicado para take {number}: {name}")
+            take[key] = file
             continue
-        match = re.fullmatch(r"(.+)\.mp4", name, re.I)
-        if match:
-            packages[match.group(1)]["mp4"] = file
-    return packages
+
+        single_match = re.fullmatch(r"(.+)\\.(mov|mp4|m4a)", name, re.I)
+        if single_match:
+            basename, extension = single_match.groups()
+            package = packages[basename]
+            if "legacy" not in package:
+                package["legacy"] = {}
+            key = extension.lower()
+            if key in package["legacy"]:
+                raise ValueError(f"Arquivo duplicado para projeto {basename}: {name}")
+            package["legacy"][key] = file
+
+    normalized = {}
+    for basename, package in packages.items():
+        if package["takes"] and package.get("legacy"):
+            raise ValueError(
+                f"Projeto {basename} mistura arquivos sem número e takes numerados. "
+                "Use somente arquivos _1, _2... ou somente arquivos sem sufixo."
+            )
+        if package["takes"]:
+            package["takes"].sort(key=lambda item: item["number"])
+            normalized[basename] = package
+        elif package.get("legacy"):
+            legacy = package["legacy"]
+            if "mov" in legacy or "mp4" in legacy:
+                normalized[basename] = {
+                    "legacy": legacy,
+                    "screen": package["screen"],
+                }
+    return normalized
 
 def download_drive_file(drive, file_id, destination):
     request = drive.files().get_media(fileId=file_id)
@@ -106,39 +145,27 @@ def download_drive_file(drive, file_id, destination):
 def upload_inputs(drive, storage_client, basename, package):
     bucket = storage_client.bucket(BUCKET_NAME)
     prefix = f"input/{basename}/"
+    files = []
+    if "takes" in package:
+        for take in package["takes"]:
+            files.extend(file for file in (take.get("video"), take.get("audio")) if file)
+    else:
+        files.extend(package.get("legacy", {}).values())
+    if package.get("screen"):
+        files.append(package["screen"])
 
     with tempfile.TemporaryDirectory() as temp_dir:
-        for extension in ("mov", "m4a", "mp4", "screen"):
-            file = package.get(extension)
-
-            if not file:
-                continue
-
+        for file in files:
             filename = file["name"]
             destination = prefix + filename
-
             if object_exists(storage_client, destination):
-                print(
-                    f"⏭️ Entrada já existe; pulando upload: {destination}",
-                    flush=True,
-                )
+                print(f"⏭️ Entrada já existe; pulando upload: {destination}", flush=True)
                 continue
-
             local_path = os.path.join(temp_dir, filename)
-
             print(f"Baixando do Drive: {filename}", flush=True)
             download_drive_file(drive, file["id"], local_path)
-
-            print(
-                f"Enviando para gs://{BUCKET_NAME}/{destination}",
-                flush=True,
-            )
-
-            bucket.blob(destination).upload_from_filename(
-                local_path,
-                timeout=3600,
-            )
-
+            print(f"Enviando para gs://{BUCKET_NAME}/{destination}", flush=True)
+            bucket.blob(destination).upload_from_filename(local_path, timeout=3600)
     print(f"Entradas de {basename} verificadas.", flush=True)
 
 # =========================
@@ -214,6 +241,47 @@ def ensure_video_synced(storage_client, basename, package):
     print(f"✅ Vídeo copiado para synced sem sync-worker: {destination_name}", flush=True)
 
 
+def ensure_multi_take_synced(credentials, storage_client, basename, package):
+    """Prepara cada take separadamente; o nome do objeto identifica sua origem."""
+    prefix = f"gs://{BUCKET_NAME}"
+    bucket = storage_client.bucket(BUCKET_NAME)
+    for take in package["takes"]:
+        number = take["number"]
+        destination_name = f"synced/{basename}/take_{number:03d}.mp4"
+        destination = bucket.blob(destination_name)
+        if destination.exists():
+            print(f"⏭️ Take {number} já preparado.", flush=True)
+            continue
+
+        video = take.get("video")
+        audio = take.get("audio")
+        if not video:
+            raise RuntimeError(f"Take {number} não possui vídeo.")
+
+        source_video = f"input/{basename}/{video['name']}"
+        if audio:
+            if video["name"].lower().endswith(".mov") is False:
+                raise RuntimeError(
+                    f"Áudio externo no take {number} exige vídeo .mov nesta versão."
+                )
+            run_job(
+                credentials,
+                "sync-worker",
+                SYNC_REGION,
+                {
+                    "VIDEO_INPUT": f"{prefix}/{source_video}",
+                    "AUDIO_INPUT": f"{prefix}/input/{basename}/{audio['name']}",
+                    "OUTPUT": f"{prefix}/{destination_name}",
+                },
+            )
+        else:
+            source = bucket.blob(source_video)
+            if not source.exists():
+                raise RuntimeError(f"Vídeo não encontrado: {source_video}")
+            bucket.copy_blob(source, bucket, destination_name)
+            print(f"✅ Take {number} copiado para {destination_name}", flush=True)
+
+
 def download_gcs_file(storage_client, object_name, destination):
     storage_client.bucket(BUCKET_NAME).blob(
         object_name
@@ -271,66 +339,46 @@ def run_job(
 
 def run_pipeline(credentials, storage_client, basename, package):
     prefix = f"gs://{BUCKET_NAME}"
-    synced_object = f"synced/{basename}/video_synced.mp4"
+    is_multi_take = "takes" in package
 
-    if object_exists(storage_client, synced_object):
-        print("⏭️ Vídeo já preparado; pulando sync.", flush=True)
-    elif "mov" in package and "m4a" in package:
-        # Fluxo legado: sincroniza vídeo com áudio externo.
-        run_job(
-            credentials,
-            "sync-worker",
-            SYNC_REGION,
-            {
-                "VIDEO_INPUT": f"{prefix}/input/{basename}/{basename}.mov",
-                "AUDIO_INPUT": f"{prefix}/input/{basename}/{basename}.m4a",
-                "OUTPUT": f"{prefix}/{synced_object}",
-            },
-        )
+    if is_multi_take:
+        ensure_multi_take_synced(credentials, storage_client, basename, package)
     else:
-        # Vídeo isolado: o áudio já está embutido e sincronizado.
-        ensure_video_synced(storage_client, basename, package)
+        legacy = package["legacy"]
+        video = legacy.get("mp4") or legacy.get("mov")
+        audio = legacy.get("m4a")
+        synced_object = f"synced/{basename}/video_synced.mp4"
+        if object_exists(storage_client, synced_object):
+            print("⏭️ Vídeo já preparado; pulando sync.", flush=True)
+        elif video and audio:
+            run_job(
+                credentials, "sync-worker", SYNC_REGION,
+                {
+                    "VIDEO_INPUT": f"{prefix}/input/{basename}/{video['name']}",
+                    "AUDIO_INPUT": f"{prefix}/input/{basename}/{audio['name']}",
+                    "OUTPUT": f"{prefix}/{synced_object}",
+                },
+            )
+        else:
+            ensure_video_synced(storage_client, basename, legacy)
 
-    # 2. TRANSCRIÇÃO
-    transcript_object = (
-        f"transcripts/{basename}/video_synced.json"
-    )
-
+    transcript_object = f"transcripts/{basename}/transcription.json"
     if object_exists(storage_client, transcript_object):
         print("⏭️ Transcrição já concluída; pulando.", flush=True)
     else:
-        run_job(
-            credentials,
-            "transcription-worker",
-            TRANSCRIPTION_REGION,
-            {"PROJECT_NAME": basename},
-        )
+        run_job(credentials, "transcription-worker", TRANSCRIPTION_REGION, {"PROJECT_NAME": basename})
 
-    # 3. EDIÇÃO POR IA
     edit_object = f"edits/{basename}/edit.json"
-
     if object_exists(storage_client, edit_object):
         print("⏭️ Edição por IA já concluída; pulando.", flush=True)
     else:
-        run_job(
-            credentials,
-            "ai-editor-worker",
-            EDITOR_REGION,
-            {"PROJECT_NAME": basename},
-        )
+        run_job(credentials, "ai-editor-worker", EDITOR_REGION, {"PROJECT_NAME": basename})
 
-    # 4. RENDERIZAÇÃO
     final_object = f"final/{basename}/final.mp4"
-
     if object_exists(storage_client, final_object):
         print("⏭️ Renderização já concluída; pulando.", flush=True)
     else:
-        run_job(
-            credentials,
-            "render-worker",
-            RENDER_REGION,
-            {"PROJECT_NAME": basename},
-        )
+        run_job(credentials, "render-worker", RENDER_REGION, {"PROJECT_NAME": basename})
 
 # =========================
 # PUBLICAR NO DRIVE
@@ -417,119 +465,42 @@ def publish_final(drive, storage_client, basename, replace_existing):
 # =========================
 
 
-def process_package(
-    credentials,
-    drive,
-    storage_client,
-    basename,
-    package,
-):
-    has_legacy_pair = "mov" in package and "m4a" in package
-    has_embedded_audio_video = (
-        "mp4" in package
-        or ("mov" in package and "m4a" not in package)
-    )
-    if not has_legacy_pair and not has_embedded_audio_video:
-        print(
-            f"SKIP {basename}: pacote sem vídeo válido "
-            "(.mov + .m4a ou vídeo isolado com áudio embutido).",
-            flush=True,
-        )
+def process_package(credentials, drive, storage_client, basename, package):
+    is_multi_take = "takes" in package
+    if is_multi_take:
+        valid = bool(package["takes"]) and all(take.get("video") for take in package["takes"])
+    else:
+        legacy = package.get("legacy", {})
+        valid = bool(legacy.get("mp4") or legacy.get("mov"))
+    if not valid:
+        print(f"SKIP {basename}: pacote sem vídeo válido.", flush=True)
         return
 
     final_object = f"final/{basename}/final.mp4"
     screen_final_object = f"final/{basename}/screen_final.mp4"
 
-    print(f"\n{'=' * 60}", flush=True)
+    print(f"\\n{'=' * 60}", flush=True)
     print(f"Projeto: {basename}", flush=True)
     print(f"{'=' * 60}", flush=True)
 
-    # Garantir que as entradas estejam no GCS.
-    upload_inputs(
-        drive,
-        storage_client,
-        basename,
-        package,
-    )
+    upload_inputs(drive, storage_client, basename, package)
 
-    # Copiar o screen para synced, se existir.
-    has_screen = ensure_screen_synced(
-        storage_client,
-        basename,
-    )
+    # Screen continua disponível no fluxo de take único. Em multi-take,
+    # uma única captura de tela não possui alinhamento temporal por take.
+    has_screen = False
+    if not is_multi_take:
+        has_screen = ensure_screen_synced(storage_client, basename)
 
-    main_exists = object_exists(
-        storage_client,
-        final_object,
-    )
-
-    screen_final_exists = object_exists(
-        storage_client,
-        screen_final_object,
-    )
-
-    # O vídeo principal já está pronto.
-    if main_exists:
-        if not has_screen:
-            print(
-                "Vídeo principal já existe e não há screen. "
-                "Nada a fazer.",
-                flush=True,
-            )
+    if object_exists(storage_client, final_object):
+        if not has_screen or object_exists(storage_client, screen_final_object):
+            print("Vídeo final já existe. Nada a fazer.", flush=True)
             return
-
-        if screen_final_exists:
-            print(
-                "Vídeo principal e screen final já existem. "
-                "Nada a fazer.",
-                flush=True,
-            )
-            return
-
-        screen_synced_object = (
-            f"synced/{basename}/screen_synced.mp4"
-        )
-
-        if not object_exists(
-            storage_client,
-            screen_synced_object,
-        ):
-            raise RuntimeError(
-                "Screen de entrada existe, mas "
-                f"{screen_synced_object} não foi encontrado."
-            )
-
-        print(
-            "Vídeo principal já existe. "
-            "Executando somente a renderização do screen.",
-            flush=True,
-        )
-
-        run_job(
-            credentials,
-            "render-worker",
-            RENDER_REGION,
-            {
-                "PROJECT_NAME": basename,
-                "SCREEN_ONLY": "true",
-            },
-        )
-
+        run_job(credentials, "render-worker", RENDER_REGION,
+                {"PROJECT_NAME": basename, "SCREEN_ONLY": "true"})
         return
 
-    # Sem vídeo final, executar o pipeline normal.
-    run_pipeline(
-        credentials,
-        storage_client,
-        basename,
-        package,
-    )
-
-    print(
-        f"\nProjeto {basename} concluído!",
-        flush=True,
-    )
-
+    run_pipeline(credentials, storage_client, basename, package)
+    print(f"\\nProjeto {basename} concluído!", flush=True)
 
 # =========================
 # MAIN
