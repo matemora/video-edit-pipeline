@@ -36,12 +36,13 @@ MODELS = [
 
 
 class EditSegment(BaseModel):
+    source: str
     start: float
     end: float
 
 
 class EditResult(BaseModel):
-    video: str
+    video: str = PROJECT_NAME
     segments: list[EditSegment]
 
 # =========================
@@ -229,6 +230,10 @@ with open(
 ) as f:
     transcription = json.load(f)
 
+# Compatibilidade com transcrições geradas antes do suporte a múltiplos takes.
+for segment in transcription.get("segments", []):
+    segment.setdefault("source", "video_synced.mp4")
+
 print(
     f"📝 Segmentos recebidos: "
     f"{len(transcription['segments'])}",
@@ -259,8 +264,9 @@ Você é o editor responsável por montar o roteiro final
 de um vídeo a partir de uma gravação contendo várias
 tentativas do apresentador.
 
-A transcrição abaixo contém segmentos com timestamps
-originais do vídeo e timestamps individuais para cada palavra.
+A transcrição abaixo contém segmentos de vários arquivos, com timestamps
+originais de cada vídeo, timestamps individuais por palavra e o campo source
+que identifica o nome exato do arquivo de origem.
 
 OBJETIVO:
 
@@ -362,8 +368,10 @@ REGRAS:
     transcrição fornecida ou corresponder exatamente aos
     timestamps "start" ou "end" de palavras existentes.
 
-14. Não combine dois takes diferentes para formar uma frase,
-    a menos que os trechos funcionem naturalmente juntos.
+14. Você pode selecionar trechos de takes diferentes. Cada trecho
+    retornado deve preservar o campo source exato do segmento de
+    transcrição correspondente. Nunca use timestamps de um arquivo
+    como se fossem de outro.
 
 15. Preserve a ordem original das ideias.
 
@@ -434,6 +442,7 @@ IMPORTANTE SOBRE OS TIMESTAMPS:
 
 Cada objeto retornado em "segments" representa EXATAMENTE
 um trecho que será enviado ao renderizador.
+Inclua obrigatoriamente "source" com o nome exato do arquivo de origem.
 
 O renderizador aceitará qualquer combinação válida de
 "start" e "end".
@@ -448,10 +457,12 @@ Retorne SOMENTE JSON válido neste formato:
 {json.dumps({
   "segments": [
     {
+      "source": "take_001.mp4",
       "start": 61.627,
       "end": 71.740
     },
     {
+      "source": "take_002.mp4",
       "start": 86.892,
       "end": 91.237
     }

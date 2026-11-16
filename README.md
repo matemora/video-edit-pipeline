@@ -637,3 +637,53 @@ Potential next improvements include:
 * creating a single pipeline command/API;
 * storing pipeline metadata and execution history;
 * adding automatic cleanup of intermediate files.
+
+
+---
+
+## 🎞️ Multiple Takes in One Project
+
+The ingest service also supports a project recorded across multiple camera clips. Numbered filenames are grouped by their shared base name:
+
+```text
+Input folder/
+├── nometema_1.mov
+├── nometema_1.m4a   # optional external audio for take 1
+├── nometema_2.mov
+├── nometema_2.m4a   # optional external audio for take 2
+└── nometema_3.mp4   # embedded audio is used when no .m4a exists
+```
+
+Rules:
+
+- The part before the final underscore-number is the project name.
+- The number identifies the take and pairs its video with an optional audio file (for example, `nometema_2.mov` + `nometema_2.m4a`).
+- If exactly one take is missing its numbered audio file, a single unnumbered `nometema.m4a` is accepted as that take's audio. If multiple takes are missing audio, the unnumbered audio is rejected as ambiguous.
+- Every numbered take must have a video. Audio is optional; when absent, the video's embedded audio is used.
+- A take with external audio is synchronized independently by the Sync Worker.
+- Numbered takes and unnumbered legacy files must not be mixed in the same project.
+- Unnumbered inputs continue to use the existing single-video or `.mov` + `.m4a` workflows.
+- A project-level `<project>_screen.mp4` is not applied to multi-take projects in this first version because it does not have a defined timeline relationship with each independently recorded take.
+
+### Multi-take processing
+
+Each take is synchronized into its own source file:
+
+```text
+synced/nometema/
+├── take_001.mp4
+├── take_002.mp4
+└── take_003.mp4
+```
+
+The Transcription Worker processes every synchronized take and stores the source filename alongside each transcript segment. The AI Editor can then select segments from different takes. Every edit segment includes:
+
+```json
+{
+  "source": "take_002.mp4",
+  "start": 12.5,
+  "end": 18.2
+}
+```
+
+The Render Worker uses each segment's source and timestamps to assemble one continuous final video. This first version enables cross-take assembly; automatic audiovisual quality scoring and specialized hook selection are future improvements.

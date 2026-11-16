@@ -566,184 +566,62 @@ def transcribe_segments(
 # MAIN
 # =========================
 
-INPUT_URI = (
-    f"gs://{BUCKET_NAME}/{INPUT_BLOB}"
+client = storage.Client()
+bucket = client.bucket(BUCKET_NAME)
+available_videos = sorted(
+    blob.name for blob in bucket.list_blobs(prefix=INPUT_PREFIX)
+    if blob.name.lower().endswith(".mp4")
+    and os.path.basename(blob.name) != "screen_synced.mp4"
 )
+take_videos = [
+    name for name in available_videos
+    if os.path.basename(name).startswith("take_")
+]
+video_blobs = take_videos or [
+    name for name in available_videos
+    if os.path.basename(name) == "video_synced.mp4"
+]
+if not video_blobs:
+    raise RuntimeError(f"Nenhum vídeo sincronizado encontrado em {INPUT_PREFIX}")
 
-filename = os.path.basename(
-    INPUT_BLOB
-)
-
-name_without_extension = os.path.splitext(
-    filename
-)[0]
-
-OUTPUT_URI = (
-    f"gs://{BUCKET_NAME}/"
-    f"{OUTPUT_PREFIX}"
-    f"{name_without_extension}.json"
-)
-
-
-print(
-    "🚀 Transcription worker",
-    flush=True
-)
-
-print(
-    f"📁 Input: {INPUT_URI}",
-    flush=True
-)
-
-print(
-    f"📄 Output: {OUTPUT_URI}",
-    flush=True
-)
-
-
-# =========================
-# DOWNLOAD
-# =========================
-
-download_from_gcs(
-    INPUT_URI,
-    VIDEO_PATH
-)
-
-print(
-    "🎬 Vídeo sincronizado baixado.",
-    flush=True
-)
-
-
-# =========================
-# EXTRAIR ÁUDIO
-# =========================
-
-extract_audio(
-    VIDEO_PATH,
-    AUDIO_PATH
-)
-
-print(
-    "✅ Áudio extraído.",
-    flush=True
-)
-
-
-# =========================
-# DETECTAR BLOCOS
-# =========================
-
-speech_segments = detect_speech_segments(
-    AUDIO_PATH
-)
-
-
-# =========================
-# WHISPERX
-# =========================
-
-print(
-    "\n📌 Carregando WhisperX...",
-    flush=True
-)
+print("🚀 Transcription worker", flush=True)
+print(f"🎬 Takes encontrados: {len(video_blobs)}", flush=True)
 
 model = whisperx.load_model(
-    MODEL_SIZE,
-    DEVICE,
-    compute_type=COMPUTE_TYPE,
-    language=LANGUAGE,
+    MODEL_SIZE, DEVICE, compute_type=COMPUTE_TYPE, language=LANGUAGE
+)
+align_model, align_metadata = whisperx.load_align_model(
+    language_code=LANGUAGE, device=DEVICE
 )
 
-print(
-    "✅ Modelo carregado!",
-    flush=True
-)
-
-
-# =========================
-# ALIGNMENT MODEL
-# =========================
-
-print(
-    "\n📌 Carregando modelo de alinhamento...",
-    flush=True
-)
-
-align_model, align_metadata = (
-    whisperx.load_align_model(
-        language_code=LANGUAGE,
-        device=DEVICE,
+all_segments = []
+sources = []
+for video_blob in video_blobs:
+    source_name = os.path.basename(video_blob)
+    print(f"Processando {source_name}", flush=True)
+    download_from_gcs(f"gs://{BUCKET_NAME}/{video_blob}", VIDEO_PATH)
+    extract_audio(VIDEO_PATH, AUDIO_PATH)
+    speech_segments = detect_speech_segments(AUDIO_PATH)
+    transcription = transcribe_segments(
+        AUDIO_PATH, speech_segments, model, align_model, align_metadata
     )
-)
-
-print(
-    "✅ Modelo de alinhamento carregado!",
-    flush=True
-)
-
-
-# =========================
-# TRANSCRIBIR
-# =========================
-
-transcription = transcribe_segments(
-    AUDIO_PATH,
-    speech_segments,
-    model,
-    align_model,
-    align_metadata
-)
-
-
-# =========================
-# GERAR JSON
-# =========================
+    for segment in transcription:
+        segment["source"] = source_name
+        all_segments.append(segment)
+    sources.append(source_name)
+    print(f"{source_name}: {len(transcription)} segmentos", flush=True)
 
 output = {
-    "video": os.path.basename(
-        INPUT_URI
-    ),
+    "project": PROJECT_NAME,
     "language": LANGUAGE,
-    "segments": transcription
+    "sources": sources,
+    "segments": all_segments,
 }
-
-with open(
-    OUTPUT_PATH,
-    "w",
-    encoding="utf-8"
-) as f:
-    json.dump(
-        output,
-        f,
-        ensure_ascii=False,
-        indent=2
-    )
-
-
-print(
-    f"\n💾 JSON gerado: "
-    f"{OUTPUT_PATH}",
-    flush=True
-)
-
-
-# =========================
-# UPLOAD
-# =========================
+with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
+    json.dump(output, f, ensure_ascii=False, indent=2)
 
 upload_to_gcs(
     OUTPUT_PATH,
-    OUTPUT_URI
+    f"gs://{BUCKET_NAME}/{OUTPUT_PREFIX}video_synced.json"
 )
-
-print(
-    "\n✅ Transcrição concluída!",
-    flush=True
-)
-
-print(
-    f"📝 {len(transcription)} segmentos",
-    flush=True
-)
+print(f"Transcrição concluída: {len(all_segments)} segmentos em {len(sources)} take(s).", flush=True)
