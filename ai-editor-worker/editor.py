@@ -230,6 +230,10 @@ with open(
 ) as f:
     transcription = json.load(f)
 
+# Compatibilidade com transcrições geradas antes do suporte a múltiplos takes.
+for segment in transcription.get("segments", []):
+    segment.setdefault("source", "video_synced.mp4")
+
 print(
     f"📝 Segmentos recebidos: "
     f"{len(transcription['segments'])}",
