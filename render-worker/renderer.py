@@ -48,7 +48,7 @@ def render_segments(source_paths, segments, output_path):
 
         filters.append(
             f"[{input_index}:v]trim=start={start}:end={end},"
-            f"setpts=PTS-STARTPTS[v{index}]"
+            f"fps=30,format=yuv420p,setpts=PTS-STARTPTS[v{index}]"
         )
         audio_probe = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "a",
@@ -59,12 +59,12 @@ def render_segments(source_paths, segments, output_path):
         if audio_probe.stdout.strip():
             filters.append(
                 f"[{input_index}:a]atrim=start={start}:end={end},"
-                f"asetpts=PTS-STARTPTS[a{index}]"
+                f"aresample=44100,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS[a{index}]"
             )
         else:
             filters.append(
                 f"anullsrc=channel_layout=stereo:sample_rate=44100,"
-                f"atrim=duration={end-start},asetpts=PTS-STARTPTS[a{index}]"
+                f"atrim=duration={end-start},aresample=44100,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS[a{index}]"
             )
         concat_inputs.append(f"[v{index}][a{index}]")
 
