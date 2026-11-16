@@ -166,7 +166,7 @@ def upload_inputs(drive, storage_client, basename, package):
             files.extend(file for file in (take.get("video"), take.get("audio")) if file)
     else:
         files.extend(package.get("legacy", {}).values())
-    if package.get("screen"):
+    if package.get("screen") and "takes" not in package:
         files.append(package["screen"])
 
     with tempfile.TemporaryDirectory() as temp_dir:
