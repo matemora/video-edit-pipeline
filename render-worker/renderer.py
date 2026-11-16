@@ -37,6 +37,15 @@ def render_segments(source_paths, segments, output_path):
 
     filters = []
     concat_inputs = []
+    audio_by_source = {}
+    for source, path in source_paths.items():
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a",
+             "-show_entries", "stream=index", "-of", "csv=p=0", path],
+            capture_output=True, text=True, check=True,
+        )
+        audio_by_source[source] = bool(probe.stdout.strip())
+
     for index, segment in enumerate(segments):
         source = segment.get("source") or source_names[0]
         if source not in source_indexes:
@@ -50,13 +59,7 @@ def render_segments(source_paths, segments, output_path):
             f"[{input_index}:v]trim=start={start}:end={end},"
             f"fps=30,format=yuv420p,setpts=PTS-STARTPTS[v{index}]"
         )
-        audio_probe = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "a",
-             "-show_entries", "stream=index", "-of", "csv=p=0",
-             source_paths[source]],
-            capture_output=True, text=True, check=True,
-        )
-        if audio_probe.stdout.strip():
+        if audio_by_source[source]:
             filters.append(
                 f"[{input_index}:a]atrim=start={start}:end={end},"
                 f"aresample=44100,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS[a{index}]"
