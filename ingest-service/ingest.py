@@ -373,7 +373,7 @@ def run_pipeline(credentials, storage_client, basename, package):
         else:
             ensure_video_synced(storage_client, basename, legacy)
 
-    transcript_object = f"transcripts/{basename}/transcription.json"
+    transcript_object = f"transcripts/{basename}/video_synced.json"
     if object_exists(storage_client, transcript_object):
         print("⏭️ Transcrição já concluída; pulando.", flush=True)
     else:
