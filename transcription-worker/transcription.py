@@ -622,6 +622,6 @@ with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
 
 upload_to_gcs(
     OUTPUT_PATH,
-    f"gs://{BUCKET_NAME}/{OUTPUT_PREFIX}transcription.json"
+    f"gs://{BUCKET_NAME}/{OUTPUT_PREFIX}video_synced.json"
 )
 print(f"Transcrição concluída: {len(all_segments)} segmentos em {len(sources)} take(s).", flush=True)
