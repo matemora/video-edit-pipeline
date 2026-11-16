@@ -568,11 +568,19 @@ def transcribe_segments(
 
 client = storage.Client()
 bucket = client.bucket(BUCKET_NAME)
-video_blobs = sorted(
+available_videos = sorted(
     blob.name for blob in bucket.list_blobs(prefix=INPUT_PREFIX)
     if blob.name.lower().endswith(".mp4")
     and os.path.basename(blob.name) != "screen_synced.mp4"
 )
+take_videos = [
+    name for name in available_videos
+    if os.path.basename(name).startswith("take_")
+]
+video_blobs = take_videos or [
+    name for name in available_videos
+    if os.path.basename(name) == "video_synced.mp4"
+]
 if not video_blobs:
     raise RuntimeError(f"Nenhum vídeo sincronizado encontrado em {INPUT_PREFIX}")
 
