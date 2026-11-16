@@ -260,10 +260,6 @@ def ensure_multi_take_synced(credentials, storage_client, basename, package):
 
         source_video = f"input/{basename}/{video['name']}"
         if audio:
-            if video["name"].lower().endswith(".mov") is False:
-                raise RuntimeError(
-                    f"Áudio externo no take {number} exige vídeo .mov nesta versão."
-                )
             run_job(
                 credentials,
                 "sync-worker",
