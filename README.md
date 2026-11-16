@@ -657,7 +657,8 @@ Input folder/
 Rules:
 
 - The part before the final underscore-number is the project name.
-- The number identifies the take and pairs its video with an optional audio file.
+- The number identifies the take and pairs its video with an optional audio file (for example, `nometema_2.mov` + `nometema_2.m4a`).
+- If exactly one take is missing its numbered audio file, a single unnumbered `nometema.m4a` is accepted as that take's audio. If multiple takes are missing audio, the unnumbered audio is rejected as ambiguous.
 - Every numbered take must have a video. Audio is optional; when absent, the video's embedded audio is used.
 - A take with external audio is synchronized independently by the Sync Worker.
 - Numbered takes and unnumbered legacy files must not be mixed in the same project.
