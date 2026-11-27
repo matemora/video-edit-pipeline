@@ -1,0 +1,43 @@
+# Deploy automático de um worker no push para a main.
+# Cada worker tem o próprio trigger do Cloud Build, filtrado pela pasta
+# (--included-files='<pasta>/**'), passando _DIR e _REGION.
+# O nome da pasta é igual ao nome da imagem e do Cloud Run Job.
+#
+# O update troca só a imagem: GPU, secrets, memória e service account
+# continuam os que já estão configurados no job.
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_IMAGE}:${SHORT_SHA}
+      - -t
+      - ${_IMAGE}:latest
+      - ${_DIR}
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args: ["push", "--all-tags", "${_IMAGE}"]
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - jobs
+      - update
+      - ${_DIR}
+      - --image=${_IMAGE}:${SHORT_SHA}
+      - --region=${_REGION}
+
+substitutions:
+  _DIR: ""
+  _REGION: southamerica-east1
+  _IMAGE: southamerica-east1-docker.pkg.dev/${PROJECT_ID}/video-editor/${_DIR}
+
+options:
+  dynamicSubstitutions: true
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: 3600s
