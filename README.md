@@ -687,3 +687,36 @@ The Transcription Worker processes every synchronized take and stores the source
 ```
 
 The Render Worker uses each segment's source and timestamps to assemble one continuous final video. This first version enables cross-take assembly; automatic audiovisual quality scoring and specialized hook selection are future improvements.
+
+---
+
+## 📤 Publishing the Final Video to Google Drive
+
+After rendering, the ingest service uploads `final/<project>/final.mp4` (and `screen_final.mp4`, when present) to the Drive output folder as `<project>_final.mp4`. A new render replaces the previous file in Drive; projects that were already rendered are uploaded only if they are not in Drive yet.
+
+A service account has no storage quota in a personal Gmail Drive, so the upload is made **as the owner of the output folder**, using an OAuth refresh token stored in Secret Manager. Reading the input folder still uses the service account.
+
+### One-time setup
+
+1. In the console, **APIs & Services → OAuth consent screen**: create an *External* app, add your Gmail as a test user, then **publish it to production**. While the app is in *Testing*, refresh tokens expire after 7 days. For your own account, an unverified app in production works; Google only shows a warning screen when you authorize.
+2. **APIs & Services → Credentials → Create credentials → OAuth client ID → Desktop app**, and download the JSON as `client_secret.json`.
+3. Generate the token on your machine, signed in with the account that owns the output folder:
+
+```bash
+pip install google-auth-oauthlib
+python ingest-service/authorize_drive.py client_secret.json
+```
+
+4. Store it and let the job read it:
+
+```bash
+gcloud secrets create DRIVE_OAUTH_TOKEN --data-file=drive_token.json
+gcloud secrets add-iam-policy-binding DRIVE_OAUTH_TOKEN \
+  --member=serviceAccount:video-editor-orchestrator@ai-video-editor-510018.iam.gserviceaccount.com \
+  --role=roles/secretmanager.secretAccessor
+rm drive_token.json
+```
+
+5. Run `ingest-service/deploy.sh`. It attaches the secret to the job when the secret exists.
+
+Without `DRIVE_OAUTH_TOKEN`, the pipeline runs normally and only skips the Drive upload. If the token stops working (password change, access revoked), run steps 3–4 again with `gcloud secrets versions add DRIVE_OAUTH_TOKEN --data-file=drive_token.json`.

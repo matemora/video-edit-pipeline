@@ -1,13 +1,14 @@
 
+import json
 import os
 import re
 import tempfile
 from collections import defaultdict
 
 import google.auth
-from google.auth import impersonated_credentials
+from google.oauth2.credentials import Credentials as UserCredentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
+from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload, MediaIoBaseUpload
 from google.cloud import storage, run_v2
 from google.cloud.run_v2.types import EnvVar
 
@@ -24,6 +25,7 @@ SERVICE_ACCOUNT = (
 )
 
 DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
+UPLOAD_CHUNK_SIZE = 32 * 1024 * 1024
 CLOUD_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 
 SYNC_REGION = "southamerica-east1"
@@ -44,6 +46,28 @@ def get_credentials():
         ]
     )
     return credentials
+
+
+def get_upload_drive():
+    """Cliente do Drive que age como o dono da pasta de saída.
+
+    Service account não tem cota no Drive de um Gmail pessoal, então o upload
+    do vídeo final usa o token OAuth do usuário (gerado uma vez com
+    authorize_drive.py e guardado no Secret Manager como DRIVE_OAUTH_TOKEN).
+    Sem o token, a publicação no Drive é pulada.
+    """
+    token_json = os.environ.get("DRIVE_OAUTH_TOKEN")
+    if not token_json:
+        print(
+            "⚠️ DRIVE_OAUTH_TOKEN não configurado; vídeos finais não serão "
+            "enviados ao Drive.",
+            flush=True,
+        )
+        return None
+    user_credentials = UserCredentials.from_authorized_user_info(
+        json.loads(token_json), scopes=[DRIVE_SCOPE]
+    )
+    return build("drive", "v3", credentials=user_credentials, cache_discovery=False)
 
 
 # =========================
@@ -395,9 +419,22 @@ def run_pipeline(credentials, storage_client, basename, package):
 # PUBLICAR NO DRIVE
 # =========================
 
-def publish_final(drive, storage_client, basename, replace_existing):
-    output_name = f"{basename}_final.mp4"
-    final_object = f"final/{basename}/final.mp4"
+def publish_outputs(upload_drive, storage_client, basename, replace_existing):
+    """Envia final.mp4 (e screen_final.mp4, se existir) para a pasta de saída."""
+    if upload_drive is None:
+        return
+    publish_final(upload_drive, storage_client, basename, replace_existing)
+    if object_exists(storage_client, f"final/{basename}/screen_final.mp4"):
+        publish_final(
+            upload_drive, storage_client, basename, replace_existing,
+            object_file="screen_final.mp4", suffix="screen_final",
+        )
+
+
+def publish_final(drive, storage_client, basename, replace_existing,
+                  object_file="final.mp4", suffix="final"):
+    output_name = f"{basename}_{suffix}.mp4"
+    final_object = f"final/{basename}/{object_file}"
 
     if not object_exists(storage_client, final_object):
         raise RuntimeError(
@@ -422,23 +459,15 @@ def publish_final(drive, storage_client, basename, replace_existing):
         )
         return
 
-    with tempfile.TemporaryDirectory() as temp_dir:
-        local_path = os.path.join(temp_dir, output_name)
-
-        print(
-            f"Baixando vídeo final do GCS: {final_object}",
-            flush=True,
-        )
-
-        download_gcs_file(
-            storage_client,
-            final_object,
-            local_path,
-        )
-
-        media = MediaFileUpload(
-            local_path,
+    # Stream direto do bucket para o Drive, em pedaços: o /tmp do Cloud Run
+    # fica em memória e o job tem só 1 GiB, então não baixa o vídeo inteiro.
+    blob = storage_client.bucket(BUCKET_NAME).blob(final_object)
+    print(f"Enviando gs://{BUCKET_NAME}/{final_object} → Drive/{output_name}", flush=True)
+    with blob.open("rb", chunk_size=UPLOAD_CHUNK_SIZE) as stream:
+        media = MediaIoBaseUpload(
+            stream,
             mimetype="video/mp4",
+            chunksize=UPLOAD_CHUNK_SIZE,
             resumable=True,
         )
 
@@ -476,7 +505,7 @@ def publish_final(drive, storage_client, basename, replace_existing):
 # =========================
 
 
-def process_package(credentials, drive, storage_client, basename, package):
+def process_package(credentials, drive, upload_drive, storage_client, basename, package):
     is_multi_take = "takes" in package
     if is_multi_take:
         valid = bool(package["takes"]) and all(take.get("video") for take in package["takes"])
@@ -490,7 +519,7 @@ def process_package(credentials, drive, storage_client, basename, package):
     final_object = f"final/{basename}/final.mp4"
     screen_final_object = f"final/{basename}/screen_final.mp4"
 
-    print(f"\\n{'=' * 60}", flush=True)
+    print(f"\n{'=' * 60}", flush=True)
     print(f"Projeto: {basename}", flush=True)
     print(f"{'=' * 60}", flush=True)
 
@@ -504,14 +533,19 @@ def process_package(credentials, drive, storage_client, basename, package):
 
     if object_exists(storage_client, final_object):
         if not has_screen or object_exists(storage_client, screen_final_object):
-            print("Vídeo final já existe. Nada a fazer.", flush=True)
+            print("Vídeo final já existe no bucket.", flush=True)
+            # Só envia se ainda não estiver no Drive (projetos já processados).
+            publish_outputs(upload_drive, storage_client, basename, replace_existing=False)
             return
         run_job(credentials, "render-worker", RENDER_REGION,
                 {"PROJECT_NAME": basename, "SCREEN_ONLY": "true"})
+        publish_outputs(upload_drive, storage_client, basename, replace_existing=False)
         return
 
     run_pipeline(credentials, storage_client, basename, package)
-    print(f"\\nProjeto {basename} concluído!", flush=True)
+    # Render novo: substitui a versão anterior no Drive, se houver.
+    publish_outputs(upload_drive, storage_client, basename, replace_existing=True)
+    print(f"\nProjeto {basename} concluído!", flush=True)
 
 # =========================
 # MAIN
@@ -532,6 +566,8 @@ def main():
         credentials=credentials,
     )
 
+    upload_drive = get_upload_drive()
+
     files = list_drive_files(drive, INPUT_FOLDER_ID)
 
     print(
@@ -550,6 +586,7 @@ def main():
             process_package(
                 credentials,
                 drive,
+                upload_drive,
                 storage_client,
                 basename,
                 package,
