@@ -23,6 +23,15 @@ docker push "$IMAGE_URI"
 
 echo "🚀 Deploying Cloud Run Job..."
 
+# Token OAuth do dono da pasta de saída (gerado com authorize_drive.py).
+# Sem ele, o job roda normal e só não publica o vídeo final no Drive.
+SECRET_ARGS=()
+if gcloud secrets describe DRIVE_OAUTH_TOKEN --project="$PROJECT_ID" >/dev/null 2>&1; then
+  SECRET_ARGS=(--set-secrets="DRIVE_OAUTH_TOKEN=DRIVE_OAUTH_TOKEN:latest")
+else
+  echo "⚠️ Secret DRIVE_OAUTH_TOKEN não existe; o upload para o Drive ficará desligado."
+fi
+
 if gcloud run jobs describe "$IMAGE" \
   --region="$REGION" \
   --project="$PROJECT_ID" >/dev/null 2>&1; then
@@ -35,7 +44,8 @@ if gcloud run jobs describe "$IMAGE" \
     --cpu=1 \
     --memory=1Gi \
     --task-timeout=3600s \
-    --max-retries=0
+    --max-retries=0 \
+    "${SECRET_ARGS[@]}"
 
 else
 
@@ -47,7 +57,8 @@ else
     --cpu=1 \
     --memory=1Gi \
     --task-timeout=3600s \
-    --max-retries=0
+    --max-retries=0 \
+    "${SECRET_ARGS[@]}"
 
 fi
 
