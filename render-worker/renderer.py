@@ -13,6 +13,51 @@ EDIT_BLOB = f"edits/{PROJECT_NAME}/edit.json"
 OUTPUT_BLOB = f"final/{PROJECT_NAME}/final.mp4"
 SCREEN_BLOB = f"synced/{PROJECT_NAME}/screen_synced.mp4"
 SCREEN_ONLY = os.environ.get("SCREEN_ONLY", "false").lower() == "true"
+# Folga (s) aplicada antes e depois de cada corte, para não comer o começo da
+# primeira palavra nem a consoante/respiração do fim da última.
+CUT_PADDING = float(os.environ.get("CUT_PADDING", "0.08"))
+
+def probe_duration(path):
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "csv=p=0", path],
+        capture_output=True, text=True, check=True,
+    )
+    return float(probe.stdout.strip())
+
+def pad_segments(segments, durations, padding):
+    """Aumenta cada corte em `padding` dos dois lados, sem sair do vídeo.
+
+    Quando dois cortes seguidos vêm do mesmo arquivo e o espaço entre eles é
+    menor que a folga somada, a fronteira fica no meio desse espaço, para o
+    mesmo trecho não entrar duas vezes no vídeo final.
+    """
+    padded = []
+    for segment in segments:
+        source = segment["source"]
+        start, end = float(segment["start"]), float(segment["end"])
+        padded.append({
+            **segment,
+            "start": max(0.0, start - padding),
+            "end": min(durations[source], end + padding),
+            "_start": start,
+            "_end": end,
+        })
+
+    for previous, current in zip(padded, padded[1:]):
+        if previous["source"] != current["source"]:
+            continue
+        gap = current["_start"] - previous["_end"]
+        if 0 <= gap < 2 * padding:
+            boundary = previous["_end"] + gap / 2
+            previous["end"] = boundary
+            current["start"] = boundary
+
+    for segment in padded:
+        del segment["_start"], segment["_end"]
+        segment["start"] = round(segment["start"], 3)
+        segment["end"] = round(segment["end"], 3)
+    return padded
 
 def download_blob(bucket, blob_name, path):
     blob = bucket.blob(blob_name)
@@ -46,14 +91,24 @@ def render_segments(source_paths, segments, output_path):
         )
         audio_by_source[source] = bool(probe.stdout.strip())
 
-    for index, segment in enumerate(segments):
+    normalized = []
+    for segment in segments:
         source = segment.get("source") or source_names[0]
         if source not in source_indexes:
             raise RuntimeError(f"Source '{source}' não está entre os vídeos disponíveis.")
-        input_index = source_indexes[source]
         start, end = float(segment["start"]), float(segment["end"])
         if start < 0 or end <= start:
             raise RuntimeError(f"Intervalo inválido para {source}: {start} -> {end}")
+        normalized.append({**segment, "source": source, "start": start, "end": end})
+
+    durations = {source: probe_duration(path) for source, path in source_paths.items()}
+    segments = pad_segments(normalized, durations, CUT_PADDING)
+    print(f"✂️ Folga de {CUT_PADDING * 1000:.0f} ms aplicada em {len(segments)} cortes.", flush=True)
+
+    for index, segment in enumerate(segments):
+        source = segment["source"]
+        input_index = source_indexes[source]
+        start, end = segment["start"], segment["end"]
 
         filters.append(
             f"[{input_index}:v]trim=start={start}:end={end},"
