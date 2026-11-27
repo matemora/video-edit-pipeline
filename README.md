@@ -626,6 +626,44 @@ The remaining workers use CPU-based Cloud Run Jobs.
 
 ---
 
+## 🚀 Automatic Deploy (Cloud Build)
+
+Pushing to `main` deploys only the workers whose folder changed. A single `cloudbuild.yaml` at the repository root builds the image, pushes it to Artifact Registry with the commit SHA and `latest`, and updates the Cloud Run Job image. Job settings (GPU, secrets, memory, service account) are kept as they are.
+
+### One-time setup
+
+1. In the console: **Cloud Build → Repositories → Connect repository**, choose GitHub and install the Cloud Build app on this repository.
+2. Grant the Cloud Build service account:
+   * `roles/run.developer` on the project;
+   * `roles/iam.serviceAccountUser` on the service accounts the jobs run as (the default Compute service account and `video-editor-orchestrator`).
+3. Create one trigger per worker:
+
+```bash
+for job in sync-worker ai-editor-worker render-worker ingest-service; do
+  gcloud builds triggers create github \
+    --name="deploy-$job" \
+    --repo-owner=matemora --repo-name=video-edit-pipeline \
+    --branch-pattern='^main$' \
+    --build-config=cloudbuild.yaml \
+    --included-files="$job/**" \
+    --substitutions="_DIR=$job,_REGION=southamerica-east1"
+done
+
+gcloud builds triggers create github \
+  --name=deploy-transcription-worker \
+  --repo-owner=matemora --repo-name=video-edit-pipeline \
+  --branch-pattern='^main$' \
+  --build-config=cloudbuild.yaml \
+  --included-files='transcription-worker/**' \
+  --substitutions=_DIR=transcription-worker,_REGION=europe-west1
+```
+
+The transcription job runs in `europe-west1`, but its image stays in the `southamerica-east1` registry like the others.
+
+Branches and pull requests are not deployed. To test a branch before merging, use that worker's `deploy.sh`. To roll back, update the job to a previous image tag (the commit SHA).
+
+---
+
 ## 🔮 Next Steps
 
 Potential next improvements include:
